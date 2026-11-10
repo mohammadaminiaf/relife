@@ -7,6 +7,7 @@ import ghbook
 from library_index import fingerprint
 
 BATCH_SIZE = 50
+DOWNLOAD_BATCH_SIZES = (50, 100, 200, 1000, 5000)
 
 
 class GuidedQueue:
@@ -15,8 +16,11 @@ class GuidedQueue:
         with manager.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS batch_previews (
                 token TEXT PRIMARY KEY, kind TEXT NOT NULL, retry INTEGER NOT NULL,
-                ids TEXT NOT NULL, signature TEXT NOT NULL, created TEXT NOT NULL
+                ids TEXT NOT NULL, signature TEXT NOT NULL, created TEXT NOT NULL,
+                batch_size INTEGER NOT NULL DEFAULT 50
             )""")
+            if "batch_size" not in {row[1] for row in db.execute("PRAGMA table_info(batch_previews)")}:
+                db.execute("ALTER TABLE batch_previews ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 50")
 
     def snapshot(self, force=False):
         manager = self.manager
@@ -30,7 +34,9 @@ class GuidedQueue:
                 if ids:
                     pending[job["id"]] = ids
         result = {}
+        download_size = manager.settings()["download_batch_size"]
         for kind in ("download", "convert"):
+            batch_size = download_size if kind == "download" else BATCH_SIZE
             reserved, resume = set(), None
             for job in jobs:
                 options = json.loads(job["options"])
@@ -64,10 +70,10 @@ class GuidedQueue:
                     retry.append(book_id)
                 else:
                     ready.append(book_id)
-            result[kind] = {"kind": kind, "batch_size": BATCH_SIZE, "total": len(manager.books),
+            result[kind] = {"kind": kind, "batch_size": batch_size, "total": len(manager.books),
                             "completed": saved, "ready": len(ready), "needs_attention": attention,
                             "retryable": len(retry), "waiting_download": waiting, "reserved": held,
-                            "next_count": min(BATCH_SIZE, len(ready)), "resume_job": resume,
+                            "next_count": min(batch_size, len(ready)), "resume_job": resume,
                             "ready_ids": ready, "retry_ids": retry}
         return result
 
@@ -77,7 +83,7 @@ class GuidedQueue:
             for queue in queues.values():
                 queue.pop("ready_ids")
                 queue.pop("retry_ids")
-            return {"batch_size": BATCH_SIZE, "queues": queues}
+            return {"batch_size": queues["download"]["batch_size"], "batch_size_options": list(DOWNLOAD_BATCH_SIZES), "queues": queues}
 
     def signature(self, ids, kind):
         values = []
@@ -96,18 +102,19 @@ class GuidedQueue:
             queue = self.snapshot(force=True)[kind]
             if queue["resume_job"]:
                 raise ValueError("Resume your unfinished batch before starting another one")
-            ids = queue["retry_ids" if retry else "ready_ids"][:BATCH_SIZE]
+            batch_size = queue["batch_size"]
+            ids = queue["retry_ids" if retry else "ready_ids"][:batch_size]
             if not ids:
                 raise ValueError("No failed books to retry" if retry else "No books are ready for this batch")
-            options = {"scope": "ids", "ids": ids, "guided": True}
+            options = {"scope": "ids", "ids": ids, "guided": True, "batch_size": batch_size}
             plan = manager.plan(options, kind)
             token = secrets.token_hex(24)
             created = datetime.datetime.now(datetime.timezone.utc)
             with manager.db() as db:
                 db.execute("DELETE FROM batch_previews WHERE created < ?", ((created - datetime.timedelta(days=1)).isoformat(),))
-                db.execute("INSERT INTO batch_previews VALUES (?,?,?,?,?,?)",
-                           (token, kind, int(retry), json.dumps(ids), self.signature(ids, kind), created.isoformat()))
-            return {**plan, "token": token, "retry": retry, "guided": True, "batch_size": BATCH_SIZE}
+                db.execute("INSERT INTO batch_previews(token,kind,retry,ids,signature,created,batch_size) VALUES (?,?,?,?,?,?,?)",
+                           (token, kind, int(retry), json.dumps(ids), self.signature(ids, kind), created.isoformat(), batch_size))
+            return {**plan, "token": token, "retry": retry, "guided": True, "batch_size": batch_size}
 
     def start(self, token):
         # Import here to avoid a circular dependency with the HTTP adapter.
@@ -125,10 +132,13 @@ class GuidedQueue:
             age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(preview["created"])
             ids, kind = json.loads(preview["ids"]), preview["kind"]
             queue = self.snapshot(force=True)[kind]
-            current = queue["retry_ids" if preview["retry"] else "ready_ids"][:BATCH_SIZE]
+            batch_size = preview["batch_size"]
+            if batch_size not in (DOWNLOAD_BATCH_SIZES if kind == "download" else (BATCH_SIZE,)):
+                raise Conflict("This batch size is invalid. Review the next batch again")
+            current = queue["retry_ids" if preview["retry"] else "ready_ids"][:batch_size]
             if age > datetime.timedelta(days=1) or queue["resume_job"] or ids != current or self.signature(ids, kind) != preview["signature"]:
                 raise Conflict("Your library changed since this preview. Review the next batch again")
-            job = manager.create({"scope": "ids", "ids": ids, "guided": True}, kind)
+            job = manager.create({"scope": "ids", "ids": ids, "guided": True, "batch_size": batch_size}, kind)
             with manager.db() as db:
                 db.execute("DELETE FROM batch_previews WHERE token=?", (token,))
             return job

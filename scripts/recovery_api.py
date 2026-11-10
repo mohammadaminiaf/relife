@@ -28,7 +28,7 @@ import ghbook
 import ghm_epub
 from library_index import LibraryIndex
 from app_runtime import node_runtime
-from guided_queue import GuidedQueue
+from guided_queue import GuidedQueue, DOWNLOAD_BATCH_SIZES
 from download_diagnostics import describe, response_failure, DownloadFailure, DownloadCoordinator
 from transfer_monitor import TransferMonitor
 
@@ -134,15 +134,20 @@ class Manager:
 
     def settings(self):
         with self.db() as db:
-            row = db.execute("SELECT value FROM settings WHERE key='download_workers'").fetchone()
-        return {"download_workers": int(row[0]) if row else 8}
+            saved = {row["key"]: row["value"] for row in db.execute("SELECT key,value FROM settings")}
+        return {"download_workers": int(saved.get("download_workers", 8)),
+                "download_batch_size": int(saved.get("download_batch_size", 50))}
 
     def configure(self, options):
-        workers = options.get("download_workers")
-        if isinstance(workers, bool) or not isinstance(workers, int) or workers not in (1, 2, 4, 8):
-            raise ValueError("download_workers must be 1, 2, 4 or 8")
+        allowed = {"download_workers": (1, 2, 4, 8), "download_batch_size": DOWNLOAD_BATCH_SIZES}
+        if not options or any(key not in allowed for key in options):
+            raise ValueError("Choose download_workers or download_batch_size")
+        for key, value in options.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value not in allowed[key]:
+                raise ValueError(key + " must be one of: " + ", ".join(map(str, allowed[key])))
         with self.db() as db:
-            db.execute("INSERT INTO settings VALUES ('download_workers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(workers),))
+            db.executemany("INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                           [(key, str(value)) for key, value in options.items()])
         return self.settings()
 
     def selected(self, options, kind="download"):

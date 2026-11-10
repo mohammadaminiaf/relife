@@ -20,9 +20,10 @@ from test_recovery import Response
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8768)
+    parser.add_argument("--count", type=int, default=105)
     parser.add_argument("--errors", action="store_true", help="Simulate publisher removal and one rate limit")
     args = parser.parse_args()
-    books = sample_books(105)
+    books = sample_books(args.count)
     ghbook.catalog = lambda refresh=False: books
     attempts = Counter()
 

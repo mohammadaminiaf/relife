@@ -52,7 +52,7 @@ Main source files: `scripts/recovery_api.py` (HTTP and jobs),
   selected**. The default home page is this saved library.
 - **EPUBs** (`/epubs`): browse completed EPUBs as cards and save individual copies.
   Newly generated EPUBs use their bundled cover when one is available.
-- **Downloads** (`/downloads`): confirm the next 50 originals, choose download
+- **Downloads** (`/downloads`): choose a 50/100/200/1,000/5,000-book batch, choose download
   concurrency, and watch live speed, bytes, active books, elapsed time and waits.
 - **Convert to EPUB** (`/conversions`): see downloaded originals that need EPUBs,
   choose single or selected books, or confirm the next group of up to 50.
@@ -69,7 +69,10 @@ checks remain available alongside guided recovery.
 
 ### Guided recovery and download performance
 
-Review and confirm each group of at most 50 books. The app detects originals
+Choose **50, 100, 200, 1,000, or 5,000 books per download batch** on Downloads or
+Settings, then review and confirm the next group. The preference is saved for
+future batches; existing confirmed/paused batches keep their original selection.
+Conversion batches continue to use up to 50 books. The app detects originals
 already on disk and completed EPUBs with matching receipts, then chooses the
 next books automatically. The final group can be smaller. Guided batches use
 the whole catalog; search and selection apply to manual actions.
@@ -80,7 +83,9 @@ applies to the next batch. There is no application bandwidth cap. Actual speed
 also depends on the remote server and the network path. Stalled or incomplete
 streams retry with bounded 1 MB ranges, with at most two range requests per
 book. Every published original retains its byte count and SHA-256 receipt.
-Conversion-only batches process local originals without network downloads.
+Batch size controls how many books you confirm together, while simultaneous
+downloads separately control how many transfer at once. Conversion-only batches
+process local originals without network downloads.
 
 Files and SQLite state survive browser refreshes and service restarts. Use
 **Resume unfinished batch** to confirm continuation of remaining work. Deleting
@@ -135,7 +140,7 @@ choose another port with `./library.sh --port 8767`.
 
 Checkpoint on November 10, 2026: the library interface, persistent jobs,
 guided download/conversion queues, conversion checks and setup scripts are
-implemented; all 33 Python tests pass. Browser QA covers dedicated pages,
+implemented; all 37 Python tests pass. Browser QA covers dedicated pages,
 card libraries, both guided queues, parallel downloads, rate limiting, failure
 inspection, confirmation, pause/resume, manual controls and mobile layouts. Books and local job databases
 are excluded from Git as described below. No full-catalog job starts on launch.
@@ -327,3 +332,7 @@ To repeat the full Java/resource export:
   -cp .tools/jadx-headless-mcp-0.7.1-all.jar \
   scripts/ExportApk.java Myghbook.apk analysis/decompiled-new
 ```
+
+For batch-size browser QA, run `python tests/serve_guided_fixture.py --count 5205`,
+then `node tests/batch-size-browser.mjs`. It previews the larger options and
+confirms a generated 100-book batch without downloading real books.

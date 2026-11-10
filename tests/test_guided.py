@@ -1,4 +1,5 @@
 from collections import Counter
+import datetime
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -57,6 +58,81 @@ class GuidedTests(unittest.TestCase):
         job = self.manager.guided.start(plan["token"])
         self.manager.wait()
         return plan, self.manager.status(job["id"])
+
+    def larger_catalog(self, count=1205):
+        self.manager.close()
+        self.books = sample_books(count)
+        self.manager = Manager(self.root, list(reversed(self.books)))
+
+    def test_download_batch_choices_persist_and_confirm_exactly_5000_books(self):
+        self.larger_catalog(5205)
+        for size in (50, 100, 200, 1000, 5000):
+            self.manager.configure({"download_batch_size": size})
+            self.assertEqual(self.manager.settings()["download_workers"], 1)
+            queue = self.manager.guided.status()["queues"]
+            self.assertEqual(queue["download"]["next_count"], size)
+            self.assertEqual(queue["convert"]["batch_size"], 50)
+            plan = self.manager.guided.plan("download")
+            self.assertEqual(plan["books"], size)
+            self.assertEqual(plan["selection"]["ids"], list(range(1, size + 1)))
+            self.assertEqual(self.manager.jobs(), [])
+        self.restart()
+        self.assertEqual(self.manager.settings()["download_batch_size"], 5000)
+        with patch.object(self.manager, "launch"):
+            job = self.manager.guided.start(plan["token"])
+        self.assertEqual(job["total"], 5000)
+        self.assertEqual(job["options"]["batch_size"], 5000)
+        self.assertEqual(job["counts"]["pending"], 5000)
+        self.manager.configure({"download_batch_size": 200})
+        self.restart()
+        queue = self.manager.guided.status()["queues"]["download"]
+        self.assertEqual(queue["resume_job"]["total"], 5000)
+        self.assertEqual(queue["next_count"], 200)
+        with self.assertRaises(ValueError):
+            self.manager.guided.plan("download")
+
+    def test_preference_changes_do_not_change_reviewed_batch_or_worker_count(self):
+        self.larger_catalog()
+        self.manager.configure({"download_batch_size": 100})
+        preview = self.manager.guided.plan("download")
+        self.manager.configure({"download_batch_size": 1000})
+        with patch.object(self.manager, "launch"):
+            job = self.manager.guided.start(preview["token"])
+        self.assertEqual(job["total"], 100)
+        self.assertEqual(job["options"]["download_workers"], 1)
+        self.assertEqual(job["options"]["batch_size"], 100)
+
+    def test_old_50_book_previews_migrate_without_expanding(self):
+        self.larger_catalog()
+        self.manager.configure({"download_batch_size": 1000})
+        ids = list(range(1, 51))
+        signature = self.manager.guided.signature(ids, "download")
+        with self.manager.db() as db:
+            db.execute("DROP TABLE batch_previews")
+            db.execute("CREATE TABLE batch_previews(token TEXT PRIMARY KEY,kind TEXT,retry INTEGER,ids TEXT,signature TEXT,created TEXT)")
+            db.execute("INSERT INTO batch_previews VALUES ('legacy','download',0,?,?,?)",
+                       (json.dumps(ids), signature, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        self.restart()
+        with patch.object(self.manager, "launch"):
+            job = self.manager.guided.start("legacy")
+        self.assertEqual(job["total"], 50)
+        self.assertEqual(job["options"]["batch_size"], 50)
+        self.assertEqual(self.manager.settings()["download_batch_size"], 1000)
+
+    def test_batch_size_settings_are_validated_atomically_and_retry_batches_use_them(self):
+        self.larger_catalog()
+        for invalid in (0, 51, 1001, 5001, True, 100.0, "100"):
+            with self.assertRaises(ValueError):
+                self.manager.configure({"download_workers": 4, "download_batch_size": invalid})
+            self.assertEqual(self.manager.settings()["download_workers"], 1)
+            self.assertEqual(self.manager.settings()["download_batch_size"], 50)
+        with self.manager.db() as db:
+            db.executemany("INSERT INTO library_state(book_id,action,error) VALUES (?,'download','Server failure')",
+                           [(i,) for i in range(1, 401)])
+        self.manager.configure({"download_batch_size": 200})
+        retry = self.manager.guided.plan("download", retry=True)
+        self.assertEqual(retry["books"], 200)
+        self.assertEqual(retry["selection"]["ids"], list(range(1, 201)))
 
     def test_consecutive_downloads_are_50_50_23_and_each_needs_confirmation(self):
         with patch.object(ghbook, "download", side_effect=sample_download):
