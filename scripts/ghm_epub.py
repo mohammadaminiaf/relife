@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from app_runtime import node_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 XHTML = "http://www.w3.org/1999/xhtml"
@@ -139,8 +140,7 @@ class UnsupportedGhm(ValueError):
 
 @contextmanager
 def opened_ghm(source):
-    node = ROOT / ".tools/node_modules/node/bin/node"
-    runtime = str(node) if node.exists() else shutil.which("node")
+    runtime = node_runtime()
     if not runtime:
         raise RuntimeError("Node.js is required to decode GHM; use the project installation")
     with tempfile.TemporaryDirectory(prefix="ghm-read-") as temporary:
@@ -149,7 +149,7 @@ def opened_ghm(source):
             shutil.copyfile(source, decoded)
         else:
             result = subprocess.run([runtime, str(ROOT / "scripts/decode_ghm.mjs"), str(source), str(decoded)],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace")
             if result.returncode:
                 raise UnsupportedGhm("Cannot decode this GHM version: " + result.stderr[-1200:])
         with zipfile.ZipFile(decoded) as archive:

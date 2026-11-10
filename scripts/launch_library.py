@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import time
@@ -44,8 +43,23 @@ def main():
         return 0
     if args.stop:
         if running:
-            os.kill(running["pid"], signal.SIGINT)
+            control = Path(running["data_dir"]) / "analysis/recovery/service-control.json"
+            try:
+                token = json.loads(control.read_text(encoding="utf-8"))["token"]
+                request = urllib.request.Request(url + "/shutdown", data=json.dumps({"token": token}).encode(),
+                                                 headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+            except (OSError, ValueError, KeyError) as error:
+                print(f"Could not stop the library gracefully: {error}", file=sys.stderr)
+                return 1
             print("Stopping the library service. Active work is being paused; progress stays saved.")
+            started = time.monotonic()
+            while control.exists() and time.monotonic() - started < 30:
+                time.sleep(0.2)
+            if control.exists():
+                print("The service is still settling its current transfer. Wait before restarting it.", file=sys.stderr)
+                return 1
         else:
             print("Library service is already stopped.")
         return 0
@@ -57,8 +71,10 @@ def main():
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / "service.log"
         with log.open("a", encoding="utf-8") as output:
+            options = {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
             process = subprocess.Popen([sys.executable, str(ROOT / "scripts/ghbook.py"), "serve", "--port", str(args.port), "--data-dir", str(data_dir)],
-                                       cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                                       cwd=ROOT, env=dict(os.environ, PYTHONUTF8="1"), stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.STDOUT, **options)
         # A first launch can fetch the catalog. Show its location while it initializes.
         print("Starting your library. First launch may download the catalog...", flush=True)
         started = time.monotonic()
@@ -73,7 +89,8 @@ def main():
         if not running:
             print(f"Catalog initialization is still running. Check {log} and open {url} when ready.")
             return 0
-    print(f"Library: {url}\nSaved books: {data_dir}\nStop service: ./library.sh --port {args.port} --stop", flush=True)
+    launcher = ".\\library.cmd" if os.name == "nt" else "./library.sh"
+    print(f"Library: {url}\nSaved books: {data_dir}\nStop service: {launcher} --port {args.port} --stop", flush=True)
     if not args.no_browser:
         webbrowser.open(url)
     return 0

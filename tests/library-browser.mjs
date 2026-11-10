@@ -6,7 +6,10 @@ import {createRequire} from 'node:module';
 const require = createRequire(import.meta.url);
 const {chromium} = require('../.tools/node_modules/playwright-core');
 const base = process.argv[2] || 'http://127.0.0.1:8766';
-const chrome = process.env.REVIVE_CHROME || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome');
+const chrome = process.env.REVIVE_CHROME || (process.platform === 'win32'
+  ? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(file=>fs.existsSync(file))
+  : process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome');
+assert(chrome, 'Install Chrome/Edge or set REVIVE_CHROME to your browser executable.');
 const output = path.resolve('analysis');
 fs.mkdirSync(output, {recursive:true});
 const browser = await chromium.launch({headless:true, executablePath:chrome});
@@ -41,8 +44,10 @@ try {
   await page.screenshot({path:path.join(output,'library-desktop.png')});
   console.log('PASS: desktop app, full catalog, pagination and local status');
 
-  await page.locator('#category').selectOption('1956');
-  await page.waitForResponse(r=>r.url().includes('/books?')&&r.url().includes('category=1956'));
+  await Promise.all([
+    page.waitForResponse(r=>r.url().includes('/books?')&&r.url().includes('category=1956')),
+    page.locator('#category').selectOption('1956'),
+  ]);
   const expected=await (await fetch(base+'/books?category=1956&page_size=1')).json();
   await page.waitForFunction(total=>document.querySelector('#result-summary').textContent.startsWith(new Intl.NumberFormat().format(total)),expected.total);
   assert(expected.total>0 && expected.total<fullCount);

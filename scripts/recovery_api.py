@@ -2,7 +2,7 @@
 """Local Bruno adapter and persistent bulk recovery jobs. Python standard library only."""
 from contextlib import contextmanager
 import datetime
-import fcntl
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import csv
 import io
@@ -11,6 +11,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +25,12 @@ import zipfile
 import ghbook
 import ghm_epub
 from library_index import LibraryIndex
+from app_runtime import node_runtime
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 def now():
@@ -43,8 +50,15 @@ class Manager:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.lockfile = (self.state_dir / "service.lock").open("a+")
         try:
-            fcntl.flock(self.lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if os.name == "nt":
+                if self.lockfile.seek(0, os.SEEK_END) == 0:
+                    self.lockfile.write("\0")
+                    self.lockfile.flush()
+                self.lockfile.seek(0)
+                msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(self.lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
             self.lockfile.close()
             raise Conflict("Recovery service is already running; use Bruno or stop it before starting another instance")
         self.books = books if books is not None else ghbook.catalog()
@@ -414,6 +428,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("Body must be a JSON object")
+            if path == "/shutdown":
+                token = getattr(self.server, "shutdown_token", None)
+                supplied = body.get("token")
+                if not token or not isinstance(supplied, str) or not hmac.compare_digest(token, supplied):
+                    self.send_json(403, {"error": "A local service token is required"})
+                    return
+                manager.cancel.set()
+                self.send_json(200, {"status": "stopping"})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
             if path == "/library/plan":
                 kind = body.pop("kind", "download")
                 self.send_json(200, manager.plan(body, kind))
@@ -427,11 +451,14 @@ class Handler(BaseHTTPRequestHandler):
                 if directory is None:
                     raise ValueError("folder must be downloads or epubs")
                 directory.mkdir(parents=True, exist_ok=True)
-                command = "open" if sys.platform == "darwin" else "xdg-open"
-                executable = shutil.which(command)
-                if not executable:
-                    raise ValueError("No desktop folder opener is installed. Saved files are at " + str(directory))
-                subprocess.Popen([executable, str(directory)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.name == "nt":
+                    os.startfile(str(directory))
+                else:
+                    command = "open" if sys.platform == "darwin" else "xdg-open"
+                    executable = shutil.which(command)
+                    if not executable:
+                        raise ValueError("No desktop folder opener is installed. Saved files are at " + str(directory))
+                    subprocess.Popen([executable, str(directory)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.send_json(200, {"path": str(directory)})
                 return
             match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(pause|resume)", path)
@@ -460,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"status": "ok", "catalog_books": len(manager.books),
                                      "app": "revive-library", "version": 2, "pid": os.getpid(),
                                      "root": str(manager.root.resolve()), "data_dir": str(manager.data_dir.resolve()),
-                                     "conversion_runtime": bool((ghm_epub.ROOT / ".tools/node_modules/node/bin/node").is_file() or shutil.which("node")),
+                                     "conversion_runtime": bool(node_runtime()),
                                      "active_job": manager.active_job if manager.worker and manager.worker.is_alive() else None,
                                      "downloads_directory": str(manager.downloads), "epubs_directory": str(manager.epubs)})
                 return
@@ -552,16 +579,25 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port=8765, data_dir=None):
     manager = Manager(data_dir=data_dir)
+    server = None
+    control = None
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         server.manager = manager
+        server.shutdown_token = secrets.token_hex(32)
+        control = manager.state_dir / "service-control.json"
+        ghbook.save_json(control, {"token": server.shutdown_token, "port": port})
         print(f"GHBook recovery API: http://127.0.0.1:{port} ({len(manager.books)} catalog entries)", flush=True)
         print(f"Library app: http://127.0.0.1:{port} — saved files: {manager.data_dir}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\nPausing recovery before shutdown...", flush=True)
-        finally:
-            server.server_close()
     finally:
-        manager.close()
+        try:
+            if server:
+                server.server_close()
+            manager.close()
+        finally:
+            if control:
+                control.unlink(missing_ok=True)

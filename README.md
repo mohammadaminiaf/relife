@@ -1,5 +1,44 @@
 # Ghbook APK recovery
 
+## Start on Windows
+
+This is a local book recovery library: a Python HTTP service, a browser UI,
+persistent SQLite jobs, and a Node.js GHM-to-EPUB decoder. The web app runs
+without the original APK, REA, Java, Bruno, a database server, or Python packages.
+
+With Python 3.9+ and Node.js installed, open PowerShell in this folder:
+
+```powershell
+.\setup.cmd
+.\library.cmd
+```
+
+The launcher opens <http://127.0.0.1:8765> and keeps the service running in the
+background. You can also double-click `library.cmd`. First launch downloads
+the catalog, so it needs internet access. Downloads and EPUBs also need access
+to the book server; browsing the cached catalog works offline.
+
+```powershell
+.\library.cmd --status
+.\library.cmd --stop
+.\library.cmd --data-dir 'D:\Books'
+```
+
+Use **Review batch** to choose books and start recovery. The full library is
+about 62 GB before EPUBs; it is not downloaded automatically. Files default to
+`downloads/` and `epubs/`; job progress is in `analysis/recovery/`. To resume
+work from another laptop, stop its service and copy those three directories.
+Sample books and analysis mentioned below describe the original laptop and
+are not included in a fresh clone.
+
+Windows setup checks the available Node runtime and its cryptography support.
+Full APK analysis tools still use macOS, Linux or WSL and the setup below.
+
+Main source files: `scripts/recovery_api.py` (HTTP and jobs),
+`scripts/library_index.py` (search, categories and local status),
+`scripts/ghbook.py` (catalog and downloads), `scripts/ghm_epub.py` and
+`scripts/decode_ghm.mjs` (conversion), and `web/` (browser interface).
+
 ## Library app
 
 Launch the browser library with `./library.sh`, or double-click

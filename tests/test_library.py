@@ -135,6 +135,7 @@ class LibraryTests(unittest.TestCase):
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
         server.manager = self.manager
+        server.shutdown_token = "test-local-control-token"
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -159,6 +160,23 @@ class LibraryTests(unittest.TestCase):
                 summary = json.load(response)
                 self.assertEqual(summary["unchecked"], 1)
                 self.assertEqual(summary["not_downloaded"], 2)
+            for body, origin in [({}, None), ({"token": "wrong"}, None),
+                                 ({"token": server.shutdown_token}, "https://example.com")]:
+                headers = {"Content-Type": "application/json"}
+                if origin:
+                    headers["Origin"] = origin
+                request = urllib.request.Request(base + "/shutdown", data=json.dumps(body).encode(), headers=headers)
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request)
+                self.assertEqual(error.exception.code, 403)
+                self.assertFalse(self.manager.cancel.is_set())
+            request = urllib.request.Request(base + "/shutdown", data=json.dumps({"token": server.shutdown_token}).encode(),
+                                             headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(json.load(response)["status"], "stopping")
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(self.manager.cancel.is_set())
         finally:
             server.shutdown()
             thread.join()

@@ -206,7 +206,7 @@ async function poll() {
     connected(true);renderSummary(summary);state.jobs=jobs.jobs;renderJobs();
     const signature=JSON.stringify(jobs.jobs.map(j=>[j.id,j.state,j.counts,j.active_book?.id]));
     if(signature!==state.jobSignature){state.jobSignature=signature;if(state.view==='library')await loadBooks();}
-  }catch(error){if(state.online)toast('The local service disconnected. Start ./library.sh to reconnect.',true);connected(false);}
+  }catch(error){if(state.online)toast('The local service disconnected. Restart the library launcher to reconnect.',true);connected(false);}
   finally{state.polling=false;}
 }
 document.addEventListener('click',event=>{
@@ -247,7 +247,7 @@ $('refresh-catalog').onclick=async()=>{const button=$('refresh-catalog');button.
 document.addEventListener('keydown',event=>{if(event.key==='/'&&!document.querySelector('dialog[open]')&&!['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName)){event.preventDefault();$('search').focus();}});
 (async()=>{
   $('search').value=state.q;$('book-state').value=state.filter;
-  try{const info=await api('/health');connected(true);if(!info.conversion_runtime){$('runtime-notice').hidden=false;$('runtime-notice').textContent='Downloads are available. To enable compatibility checks and EPUB conversion, run ./setup.sh --app-only, then reopen the library.';}await loadCategories();await poll();setView(state.view);}
-  catch(error){connected(false);$('book-rows').innerHTML=`<tr><td colspan="7" class="empty-state"><b>Your library service is not ready.</b>${escapeHTML(error.message)}<br>Start ./library.sh, then reload this page.</td></tr>`;}
+  try{const info=await api('/health');connected(true);if(!info.conversion_runtime){$('runtime-notice').hidden=false;$('runtime-notice').textContent='Downloads are available. To enable compatibility checks and EPUB conversion, run setup.cmd on Windows or ./setup.sh --app-only on macOS/Linux, then reopen the library.';}await loadCategories();await poll();setView(state.view);}
+  catch(error){connected(false);$('book-rows').innerHTML=`<tr><td colspan="7" class="empty-state"><b>Your library service is not ready.</b>${escapeHTML(error.message)}<br>Start library.cmd on Windows or ./library.sh on macOS/Linux, then reload this page.</td></tr>`;}
   setInterval(poll,3500);
 })();

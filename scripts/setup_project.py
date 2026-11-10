@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore this project's pinned REA checkout and tools on macOS or Linux."""
+"""Check the library runtime, or restore the full REA toolchain on macOS/Linux."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from app_runtime import node_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE_NAME = "jadx-headless-mcp-0.7.1-all.jar"
@@ -102,13 +103,16 @@ def check():
 
 
 def check_app():
-    runtime = ROOT / ".tools/node_modules/node/bin/node"
+    runtime = node_runtime()
+    if not runtime:
+        raise ValueError("Node.js is required for EPUB conversion. Install Node.js, then rerun setup.")
     version = run([str(runtime), "--version"], capture_output=True, text=True).stdout.strip()
     packages = json.loads((ROOT / ".tools/package.json").read_text())["dependencies"]
-    if version != "v" + packages["node"]:
+    if os.name != "nt" and version != "v" + packages["node"]:
         raise ValueError("Project Node.js differs from its pinned version")
     run([str(runtime), "--input-type=module", "-e", "import {createDecipheriv} from 'node:crypto'; if(typeof createDecipheriv !== 'function') process.exit(1)"], capture_output=True, text=True)
-    print(f"Library app ready: Python {sys.version.split()[0]}, Node {version}. Run ./library.sh", flush=True)
+    launcher = ".\\library.cmd" if os.name == "nt" else "./library.sh"
+    print(f"Library app ready: Python {sys.version.split()[0]}, Node {version}. Run {launcher}", flush=True)
 
 
 def main():
@@ -117,8 +121,11 @@ def main():
     parser.add_argument("--app-only", action="store_true", help="Set up the local library app without JADX, a JDK, REA source or Bruno CLI")
     args = parser.parse_args()
     try:
-        if os.name != "posix":
-            raise ValueError("Use macOS, Linux, or WSL for this project's shell scripts and recovery service")
+        if os.name == "nt":
+            if not args.app_only:
+                raise ValueError("Use setup.cmd --app-only for the Windows library. Full APK analysis requires macOS, Linux or WSL.")
+            check_app()
+            return 0
         if not args.app_only and not shutil.which("git"):
             raise ValueError("Git is required to initialize the pinned REA submodule")
         if not args.check:
