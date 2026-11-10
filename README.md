@@ -24,7 +24,8 @@ to the book server; browsing the cached catalog works offline.
 .\library.cmd --data-dir 'D:\Books'
 ```
 
-Use **Review batch** to choose books and start recovery. The full library is
+Use **Review next 50 downloads** to start guided recovery, or **Review batch**
+to choose books manually. The full library is
 about 62 GB before EPUBs; it is not downloaded automatically. Files default to
 `downloads/` and `epubs/`; job progress is in `analysis/recovery/`. To resume
 work from another laptop, stop its service and copy those three directories.
@@ -41,6 +42,36 @@ Main source files: `scripts/recovery_api.py` (HTTP and jobs),
 
 ## Library app
 
+### Guided recovery in batches of 50
+
+The **Your library, 50 books at a time** panel handles the whole catalog without
+selecting individual books. Choose **Review next 50 downloads**, review the
+storage estimate, and confirm the batch. Originals save automatically to the
+displayed downloads folder. The panel tracks overall progress and the active
+batch; after it finishes, the next group waits for your confirmation. The final
+batch can contain fewer than 50 books. Only one job runs at a time.
+
+Use **Review next 50 conversions** in the same panel to turn saved originals
+into EPUBs. It automatically finds books without a matching completed EPUB and
+saves them to the EPUB folder. Downloads and conversion have separate queues,
+so you can alternate them whenever you like. These queues always use the whole
+catalog; search, filters and checkboxes apply to the manual controls below.
+
+Files and SQLite progress survive browser refreshes and service restarts. If
+you pause or close the service during a guided batch, **Review unfinished batch**
+offers to resume the remaining work first. Existing files, including books
+downloaded manually or copied into the downloads folder, are detected. Deleting
+a saved original or EPUB makes that work eligible again. Keep originals: EPUB
+receipts are checked against them to recognize completed conversions.
+
+Failed books are set aside so later batches can continue. **Review retries**
+offers up to 50 failed books for a separate confirmed retry, and **View jobs**
+shows per-book errors. The manual selection, filtered batches, compatibility
+checks, individual file downloads, conversion, and manual full restore remain
+available. On Windows and macOS, the same storage behavior applies; use
+**Saved files** to view or open the actual folders, or the launcher's
+`--data-dir` option to store your library on another drive.
+
 Launch the browser library with `./library.sh`, or double-click
 `Library.command` on macOS. It supports catalog search, category and language
 filters, local download/conversion status, format checks, batch previews,
@@ -54,10 +85,10 @@ If an older recovery service occupies port 8765, stop that service first or
 choose another port with `./library.sh --port 8767`.
 
 Checkpoint on November 10, 2026: the library interface, persistent jobs,
-conversion checks and setup scripts are implemented; all 17 Python tests pass.
-The full catalog recovery has not started. The existing local sample jobs are
-complete, so there is no running bulk job with a measurable remaining time.
-Books and local job databases are excluded from Git as described below.
+guided download/conversion queues, conversion checks and setup scripts are
+implemented; all 24 Python tests pass. Browser QA covers both guided queues,
+confirmation, pause/resume and manual controls. Books and local job databases
+are excluded from Git as described below. No full-catalog job starts on launch.
 
 ## Bruno API
 
@@ -192,6 +223,11 @@ automatically and record failures for later retries.
 python3 -m unittest discover -s tests -v
 ./bru.sh run '01 Catalog' --env Local
 ```
+
+For repeatable browser QA of the guided flow, with the local Playwright tools
+installed, run `python tests/serve_guided_fixture.py`, then in another terminal
+run `node tests/guided-browser.mjs`. This uses 105 generated local books,
+exercises both 50/50/5 queues and pause/resume, and does not download real books.
 
 The Python tests cover transfer integrity, corrupt-file preservation, bulk
 failure handling, pause/resume, restart recovery, HTTP endpoints and EPUB content.

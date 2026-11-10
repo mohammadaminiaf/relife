@@ -18,6 +18,7 @@ async function api(path, body) {
   return value;
 }
 let toastTimer;
+let batchReviewRequest=0;
 function toast(message, error=false) { $('toast').textContent=message; $('toast').classList.toggle('error',error); $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,error?8500:4500); }
 function showDialog(id) { document.querySelectorAll('dialog[open]').forEach(d=>d.close()); $(id).showModal(); }
 function activeJob() { return state.jobs.find(j=>['running','pausing'].includes(j.state)); }
@@ -118,6 +119,47 @@ function renderSummary(summary) {
   }
 }
 function modeName(mode) {return {restore:'Download + EPUB',download:'Download originals',convert:'Convert saved books',check:'Check compatibility'}[mode];}
+function renderGuided() {
+  if(!state.guided)return;
+  const active=activeJob();
+  const signature=JSON.stringify([state.guided,active,state.online]);
+  if(signature===state.guidedRenderSignature)return;
+  state.guidedRenderSignature=signature;
+  $('guided-start').disabled=!!active||!state.online||(!state.guided.queues.download.next_count&&!state.guided.queues.download.resume_job);
+  $('guided-cards').innerHTML=['download','convert'].map(kind=>{
+    const q=state.guided.queues[kind], downloading=kind==='download';
+    const job=active?.options.guided&&active.kind===kind?active:null;
+    const percent=100*q.completed/Math.max(q.total,1);
+    const count=q.next_count, resume=q.resume_job;
+    const label=resume?'Review unfinished batch':count?`Review next ${count} ${downloading?'downloads':'conversions'}`:downloading?(q.completed===q.total?'All originals saved':'No new downloads ready'):'No conversions ready';
+    const description=downloading?'Originals are saved automatically. Books already on disk are skipped.':'Saved originals become EPUBs automatically. Finished EPUBs are skipped.';
+    let progress=resume?`Your unfinished batch has ${number(resume.counts.pending+resume.counts.failed)} books left. Review it to resume.`:count?`${number(q.ready)} ready for future batches. Each batch waits for your confirmation.`:q.needs_attention?'Remaining books need attention. Review a retry batch or use the manual controls.':downloading?'All available originals are saved.':'Download more originals to make them available for conversion.';
+    if(!count&&!resume&&!q.needs_attention){
+      if(q.reserved)progress='Finish your unfinished jobs to continue. Open View jobs to review them.';
+      else if(q.completed===q.total)progress=downloading?'All available originals are saved.':'All available originals have an EPUB.';
+    }
+    if(job)progress=`Batch in progress: ${number(job.counts.done+job.counts.skipped)} of ${number(job.total)} saved, ${number(job.counts.failed)} failed.${job.active_book?' Working on #'+job.active_book.id+'.':''}`;
+    return `<article class="guided-card" data-guided-card="${kind}"><div class="guided-card-heading"><h3>${downloading?'Download library':'Convert library to EPUB'}</h3>${icon(downloading?'download':'book')}</div><p class="subtle">${description}</p><div class="guided-total"><strong>${number(q.completed)}</strong><span>of ${number(q.total)} ${downloading?'originals saved':'EPUBs ready'}</span></div><div class="job-progress" role="progressbar" aria-label="${downloading?'Library download':'Library conversion'} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(percent)}"><span style="width:${percent}%"></span></div><p class="guided-progress" data-guided-progress="${kind}">${escapeHTML(progress)}</p><div class="guided-counts">${q.waiting_download?`<span>${number(q.waiting_download)} awaiting download</span>`:''}${q.needs_attention?`<span>${number(q.needs_attention)} need attention</span>`:''}${q.reserved&&!resume?`<span>${number(q.reserved)} in unfinished jobs</span>`:''}</div><div class="guided-actions"><button class="button primary small" data-guided="${kind}" ${active||(!count&&!resume)||!state.online?'disabled':''}>${escapeHTML(label)} ${icon('arrow')}</button>${job?`<button class="button outlined small" data-job-action="pause" data-job-id="${job.id}" ${job.state==='pausing'?'disabled':''}>${job.state==='pausing'?'Pausing…':'Pause batch'}</button>`:''}${q.retryable&&!resume?`<button class="text-button" data-guided-retry="${kind}" ${active||!state.online?'disabled':''}>Review retries (${number(Math.min(q.batch_size,q.retryable))})</button>`:''}<button class="text-button" data-view="jobs">View jobs</button></div></article>`;
+  }).join('');
+  if(state.summary)$('guided-storage').textContent=`Saved automatically on this computer: originals in ${state.summary.downloads_directory} · EPUBs in ${state.summary.epubs_directory}`;
+}
+async function reviewGuided(kind, retry=false) {
+  const resume=state.guided?.queues[kind]?.resume_job;
+  if(!resume)return reviewBatch({mode:kind,kind,guided:true,retry});
+  const request=++batchReviewRequest;
+  state.plan=null;
+  $('batch-title').textContent='Resume your unfinished batch';
+  $('batch-description').textContent=modeName(kind)+' · Completed books remain saved.';
+  $('batch-error').textContent='';$('start-batch').textContent='Confirm resume';$('start-batch').disabled=true;
+  $('batch-plan').innerHTML='<p class="subtle">Checking your saved batch…</p>';showDialog('batch-dialog');
+  try {
+    const job=await api('/jobs/'+resume.id);
+    if(!$('batch-dialog').open||request!==batchReviewRequest)return;
+    const remaining=job.counts.pending+job.counts.failed;
+    $('batch-plan').innerHTML=`<div class="plan-numbers"><div><b>${number(remaining)}</b><span>books remaining in this batch</span></div><div><b>${number(job.counts.done+job.counts.skipped)}</b><span>already completed</span></div></div><p class="plan-notes">Continue this saved batch first. We’ll prepare the next batch of up to 50 after it finishes. Previously failed books in this batch will also be retried.</p>`;
+    state.plan={mode:kind,kind,guidedResume:job.id};syncBatchAvailability();
+  }catch(error){if(request===batchReviewRequest)$('batch-error').textContent=error.message;}
+}
 function buildBatch(override) {
   if(override)return override;
   const mode=$('batch-mode').value;
@@ -130,19 +172,22 @@ function buildBatch(override) {
   return {mode,kind:mode==='convert'?'convert':mode==='check'?'check':'download',options};
 }
 async function reviewBatch(override) {
+  const request=++batchReviewRequest;
   try {
     const batch=buildBatch(override);
     state.plan=null;
-    $('batch-title').textContent=override?.entire?'Restore the entire library':'Review your batch';
+    $('batch-title').textContent=batch.guided?'Review your next batch':override?.entire?'Restore the entire library':'Review your batch';
     $('batch-description').textContent=modeName(batch.mode)+(batch.kind==='check'||batch.kind==='convert'?' · Only saved originals are included.':' · Original files stay unchanged.');
     $('batch-plan').innerHTML='<p class="subtle">Calculating your selection…</p>'; $('batch-error').textContent=''; $('start-batch').disabled=true;
+    $('start-batch').textContent=batch.guided?'Confirm batch':'Start batch';
     showDialog('batch-dialog');
-    const plan=await api('/library/plan',{...batch.options,kind:batch.kind});
-    if(!$('batch-dialog').open)return;
+    const plan=batch.guided?await api('/guided/plan',{kind:batch.kind,retry:batch.retry}):await api('/library/plan',{...batch.options,kind:batch.kind});
+    if(!$('batch-dialog').open||request!==batchReviewRequest)return;
     state.plan={...batch,plan};
+    if(batch.guided){$('batch-title').textContent=`Confirm ${batch.retry?'retry of':'next'} ${number(plan.books)} ${batch.kind==='download'?'downloads':'conversions'}`;$('batch-description').textContent='Chosen automatically from your whole library. The next batch will wait for a new confirmation.';}
     $('batch-plan').innerHTML=`<div class="plan-numbers"><div><b>${number(plan.books)}</b><span>books in this batch</span></div><div><b>${batch.kind==='download'?bytes(plan.missing_ghm_bytes):'Local files'}</b><span>${batch.kind==='download'?'of originals to download':'no originals will be downloaded'}</span></div></div><div class="plan-notes">${number(plan.existing_files_to_verify)} original files already saved. ${bytes(plan.disk_free_bytes)} free on this drive.<br>${batch.mode==='restore'?'EPUBs are created after each download and require additional space.':batch.mode==='check'?'The reader checks the downloaded container and records whether its text is compatible. No EPUB is created.':batch.mode==='convert'?'Compatible local originals are exported to the EPUB folder.':'Each saved file includes a checksum receipt.'}</div><ul class="plan-samples">${plan.sample.map(b=>`<li><bdi>${escapeHTML(b.title)}</bdi><span>#${b.id}</span></li>`).join('')}</ul>${plan.books>plan.sample.length?`<p class="subtle">…and ${number(plan.books-plan.sample.length)} more books.</p>`:''}`;
     syncBatchAvailability();
-  } catch(error) { $('batch-error').textContent=error.message==='No books match the selection'?'No eligible books remain in this selection. Change the filters or turn off “Skip completed”.':error.message; }
+  } catch(error) { if(request===batchReviewRequest)$('batch-error').textContent=error.message==='No books match the selection'?'No eligible books remain in this selection. Change the filters or turn off “Skip completed”.':error.message; }
 }
 async function startBatch() {
   if(!state.plan)return;
@@ -150,10 +195,11 @@ async function startBatch() {
   $('start-batch').disabled=true; $('batch-error').textContent='';
   try {
     const batch=state.plan, endpoint=batch.kind==='convert'?'/conversions':batch.kind==='check'?'/checks':'/jobs';
-    const job=await api(endpoint,batch.options);
+    const job=batch.guidedResume?await api(`/jobs/${batch.guidedResume}/resume`,{}):batch.guided?await api('/guided/start',{token:batch.plan.token}):await api(endpoint,batch.options);
+    if(batch.guided||batch.guidedResume)state.followGuided=job.id;
     $('batch-dialog').close();state.selected.clear();resetAllSelection();
     toast(`${modeName(batch.mode)} started for ${number(job.total)} books. Your progress is saved automatically.`);
-    await refreshJobs();setView('jobs');
+    await refreshJobs();setView('jobs');poll();
   } catch(error) { $('batch-error').textContent=error.message; $('start-batch').disabled=false; }
   finally {state.startingBatch=false;syncBatchAvailability();}
 }
@@ -161,6 +207,7 @@ function jobLabel(job) { return job.kind==='check'?'Compatibility check':job.kin
 function jobState(job) { return {running:'In progress',pausing:'Pausing…',paused:'Paused',interrupted:'Ready to resume',completed:'Completed',completed_with_errors:'Completed with errors',failed:'Needs attention'}[job.state]||job.state; }
 function renderJobs() {
   syncBatchAvailability();
+  renderGuided();
   $('job-count').textContent=number(state.jobs.length);
   const active=activeJob();
   $('sidebar-job').hidden=!active;
@@ -175,7 +222,7 @@ function renderJobs() {
     return `<article class="job-card"><div class="job-card-header"><div><h3>${escapeHTML(jobLabel(job))} · ${number(job.total)} books</h3><div class="job-meta">${escapeHTML(new Date(job.created).toLocaleString())} · ${escapeHTML(job.options.q?`“${job.options.q}”`:'')}${job.options.lang?' · '+escapeHTML(languages[job.options.lang]||job.options.lang):''}<br>Job ${job.id.slice(0,12)}</div></div><span class="status-badge ${stateClass}">${escapeHTML(jobState(job))}</span></div><div class="job-progress" role="progressbar" aria-label="Batch progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(percent)}"><span style="width:${percent}%"></span></div><div class="job-counts"><span><b>${number(c.done)}</b> completed</span><span><b>${number(c.skipped)}</b> already saved</span><span><b>${number(c.pending)}</b> remaining</span><span><b>${number(c.failed)}</b> failed</span></div>${job.active_book?`<div class="job-active">Working on <bdi>${escapeHTML(job.active_book.title)}</bdi> · #${job.active_book.id}</div>`:''}${job.error?`<div class="job-error">${escapeHTML(job.error)}</div>`:''}<div class="job-actions">${action}<button class="button ghost small" data-job-results="${job.id}">View results</button>${c.failed?`<button class="button ghost small" data-job-failures="${job.id}">Review ${number(c.failed)} failures</button>`:''}</div></article>`;
   }).join(''):`<div class="empty-state"><b>Your first batch starts a new chapter.</b>Select books in the library and review a batch to begin.<br><button class="button outlined small" data-back-library>Browse library</button></div>`;
 }
-async function refreshJobs() { const data=await api('/jobs');state.jobs=data.jobs;renderJobs(); }
+async function refreshJobs() { const [data,guided]=await Promise.all([api('/jobs'),api('/guided')]);state.jobs=data.jobs;state.guided=guided;renderJobs(); }
 async function jobAction(id, action, button) {
   button.disabled=true;
   try { await api(`/jobs/${id}/${action}`,{});await refreshJobs();toast(action==='pause'?'Pausing after the current transfer settles. Completed files stay saved.':'Job resumed. Completed books are preserved.'); }
@@ -202,16 +249,20 @@ function connected(online) { state.online=online;$('connection-dot').classList.t
 async function poll() {
   if(state.polling)return;state.polling=true;
   try {
-    const [summary,jobs]=await Promise.all([api('/library/summary'),api('/jobs')]);
-    connected(true);renderSummary(summary);state.jobs=jobs.jobs;renderJobs();
+    const [summary,jobs,guided]=await Promise.all([api('/library/summary'),api('/jobs'),api('/guided')]);
+    connected(true);renderSummary(summary);state.jobs=jobs.jobs;state.guided=guided;renderJobs();
+    const finished=state.jobs.find(j=>j.id===state.followGuided&&['completed','completed_with_errors','failed'].includes(j.state));
+    if(finished){state.followGuided=null;toast('Batch finished. Review the next batch when you’re ready. Failed books are kept for retry.');}
     const signature=JSON.stringify(jobs.jobs.map(j=>[j.id,j.state,j.counts,j.active_book?.id]));
     if(signature!==state.jobSignature){state.jobSignature=signature;if(state.view==='library')await loadBooks();}
-  }catch(error){if(state.online)toast('The local service disconnected. Restart the library launcher to reconnect.',true);connected(false);}
+  }catch(error){if(state.online)toast('The local service disconnected. Restart the library launcher to reconnect.',true);connected(false);renderGuided();}
   finally{state.polling=false;}
 }
 document.addEventListener('click',event=>{
   const button=event.target.closest('button,a');if(!button)return;
   if(button.matches('[data-close]')){button.closest('dialog').close();return;}
+  if(button.dataset.guided){reviewGuided(button.dataset.guided);return;}
+  if(button.dataset.guidedRetry){reviewGuided(button.dataset.guidedRetry,true);return;}
   if(button.dataset.view){setView(button.dataset.view,button.dataset.state);return;}
   if(button.hasAttribute('data-reset-filters')){resetFilters();return;}
   if(button.hasAttribute('data-back-library')){setView('library');return;}
@@ -236,6 +287,7 @@ $('page-size').onchange=()=>{state.pageSize=Number($('page-size').value);state.p
 $('previous-page').onclick=()=>{if(state.page>1){state.page--;loadBooks();}};
 $('next-page').onclick=()=>{if(state.page*state.pageSize<state.total){state.page++;loadBooks();}};
 $('review-batch').onclick=()=>reviewBatch();$('start-batch').onclick=startBatch;
+$('guided-start').onclick=()=>reviewGuided('download');
 $('restore-all').onclick=()=>reviewBatch({mode:'restore',kind:'download',entire:true,options:{scope:'all',convert_epub:true,skip_converted:true}});
 $('clear-filters').onclick=resetFilters;
 $('find-category').onclick=()=>{$('category-search').value='';renderCategorySearch();showDialog('category-dialog');$('category-search').focus();};

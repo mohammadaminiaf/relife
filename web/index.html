@@ -48,7 +48,7 @@
   <div class="workspace">
     <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <b id="breadcrumb-view">Library</b></div><div class="topbar-actions"><button class="button ghost small" id="jobs-shortcut"><svg><use href="#i-jobs"/></svg>Jobs</button><button class="button ghost small" id="refresh-catalog" title="Fetch the latest catalog"><svg><use href="#i-refresh"/></svg><span>Refresh catalog</span></button><button class="button outlined small" id="open-files"><svg><use href="#i-folder"/></svg>Saved files</button></div></header>
     <main id="main">
-      <section class="intro"><div><p class="eyebrow">A NEW CHAPTER FOR YOUR BOOKS</p><h1 id="page-title">Recover your library.</h1><p id="page-description">Find your books, restore the originals, and give them a new home in EPUB.</p></div><button class="button primary" id="restore-all"><svg><use href="#i-download"/></svg>Restore entire library</button></section>
+      <section class="intro"><div><p class="eyebrow">A NEW CHAPTER FOR YOUR BOOKS</p><h1 id="page-title">Recover your library.</h1><p id="page-description">Find your books, restore the originals, and give them a new home in EPUB.</p></div><button class="button primary" id="guided-start"><svg><use href="#i-download"/></svg>Download in batches of 50</button></section>
       <div class="notice" id="runtime-notice" hidden></div>
       <section class="stats" aria-label="Library overview">
         <article><div class="stat-label">Books in catalog <svg><use href="#i-grid"/></svg></div><strong data-count="total">—</strong><span id="catalog-size">Waiting for catalog</span></article>
@@ -56,8 +56,13 @@
         <article class="stat-accent"><div class="stat-label">EPUBs ready <svg><use href="#i-book"/></svg></div><strong data-count="converted">—</strong><span id="epub-size">Ready for your updated app</span></article>
         <article><div class="stat-label">Ready to convert <svg><use href="#i-check"/></svg></div><strong data-count="convertible">—</strong><span id="unchecked-count">Checked with the recovered reader</span></article>
       </section>
+      <section class="guided-section" aria-labelledby="guided-title">
+        <div class="section-heading"><div><h2 id="guided-title">Your library, 50 books at a time</h2><p class="subtle">We choose the next books across your whole library. Confirm each batch, follow its progress, then continue when you’re ready.</p></div></div>
+        <div id="guided-cards" class="guided-cards"><p class="subtle">Checking saved books and your next batches…</p></div>
+        <p class="guided-storage subtle" id="guided-storage"></p>
+      </section>
       <section id="library-view">
-        <div class="section-heading"><div><h2>Your collection</h2><span class="subtle" id="result-summary">Loading books…</span></div><a class="button ghost small" id="export-library" href="/library/export" download>Export list <svg><use href="#i-download"/></svg></a></div>
+        <div class="section-heading"><div><h2>Your collection</h2><span class="subtle" id="result-summary">Loading books…</span></div><div class="collection-tools"><button class="text-button" id="restore-all" title="Download and convert the whole catalog in one manual job">Manual full restore</button><a class="button ghost small" id="export-library" href="/library/export" download>Export list <svg><use href="#i-download"/></svg></a></div></div>
         <div class="filters">
           <label class="search-field"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search title, author or book ID…" aria-label="Search books"><kbd>/</kbd></label>
           <div class="filter-field"><span class="category-label">Category <button class="text-button" id="find-category" aria-label="Search category names">Find</button></span><select id="category" aria-label="Category"><option value="">All categories</option></select></div>

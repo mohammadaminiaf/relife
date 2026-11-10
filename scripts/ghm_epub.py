@@ -202,7 +202,7 @@ def convert(source, output=None):
     if output.exists():
         receipt = output.with_suffix(".epub.json")
         if receipt.exists():
-            previous = json.loads(receipt.read_text())
+            previous = json.loads(receipt.read_text(encoding="utf-8"))
             if previous.get("source_sha256") == source_hash and previous.get("sha256") == hashlib.sha256(output.read_bytes()).hexdigest():
                 validate(output)
                 return {**previous, "source": str(source), "path": str(output.resolve()), "skipped": True}

@@ -26,6 +26,7 @@ import ghbook
 import ghm_epub
 from library_index import LibraryIndex
 from app_runtime import node_runtime
+from guided_queue import GuidedQueue
 
 if os.name == "nt":
     import msvcrt
@@ -92,6 +93,7 @@ class Manager:
             db.execute("UPDATE jobs SET state='interrupted', updated=? WHERE state IN ('running','pausing')", (now(),))
             db.execute("UPDATE items SET status='pending' WHERE status='active'")
         self.library = LibraryIndex(self)
+        self.guided = GuidedQueue(self)
 
     @contextmanager
     def db(self):
@@ -428,6 +430,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("Body must be a JSON object")
+            if path == "/guided/plan":
+                self.send_json(200, manager.guided.plan(body.get("kind"), body.get("retry", False)))
+                return
+            if path == "/guided/start":
+                self.send_json(202, manager.guided.start(body.get("token")))
+                return
             if path == "/shutdown":
                 token = getattr(self.server, "shutdown_token", None)
                 supplied = body.get("token")
@@ -493,6 +501,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/library/summary":
                 self.send_json(200, manager.library.summary())
+                return
+            if path == "/guided":
+                self.send_json(200, manager.guided.status())
                 return
             if path == "/categories":
                 self.send_json(200, {"categories": manager.library.category_rows()})
