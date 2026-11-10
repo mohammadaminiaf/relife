@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import hashlib
+import html
 import io
 import json
 import os
@@ -127,6 +128,36 @@ def parse_catalog(text):
     return books
 
 
+def parse_categories(text):
+    categories = []
+    for row in csv.reader(io.StringIO(text.lstrip("\ufeff"))):
+        if not row or not any(row):
+            continue
+        if len(row) < 3 or not row[0].isdigit():
+            raise ValueError("Unexpected category row in subjects.txt")
+        category = {"id": row[0], "parent_id": row[1]}
+        for language, index in [("fa", 2), ("ar", 4), ("en", 5), ("az", 6), ("id", 7), ("ur", 8), ("zh", 9)]:
+            category["title_" + language] = html.unescape(row[index]).strip() if len(row) > index else ""
+        categories.append(category)
+    return categories
+
+
+def category_cache(root=ROOT):
+    cache = Path(root) / "analysis"
+    path = cache / "categories.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    archive = cache / "catalog.zip"
+    if archive.exists():
+        with zipfile.ZipFile(archive) as source:
+            names = [n for n in source.namelist() if Path(n).name == "subjects.txt"]
+            if len(names) == 1:
+                result = parse_categories(source.read(names[0]).decode("utf-8-sig"))
+                save_json(path, result)
+                return result
+    return []
+
+
 def catalog(refresh=False):
     path = CACHE / "catalog.json"
     if path.exists() and not refresh:
@@ -143,6 +174,9 @@ def catalog(refresh=False):
         if len(candidates) != 1:
             raise ValueError("Catalog must contain exactly one books.txt")
         books = parse_catalog(archive.read(candidates[0]).decode("utf-8-sig"))
+        subjects = [n for n in archive.namelist() if Path(n).name == "subjects.txt"]
+        if len(subjects) == 1:
+            save_json(CACHE / "categories.json", parse_categories(archive.read(subjects[0]).decode("utf-8-sig")))
     save_json(path, books)
     return books
 
@@ -191,7 +225,7 @@ def download(book_id, output, book=None, resume=False, cancel=None):
             if (str(previous.get("id")) == str(book_id) and previous.get("bytes") == target.stat().st_size
                     and (not expected or expected == target.stat().st_size)
                     and previous.get("sha256") == file_hash(target)):
-                return {**previous, "skipped": True}
+                return {**previous, "path": str(target.resolve()), "mtime_ns": target.stat().st_mtime_ns, "skipped": True}
         reason = "Existing file could not be verified against its receipt and catalog; kept unchanged" if resume else "Already exists"
         raise FileExistsError(f"{reason}: {target}")
     url = download_url(book)
@@ -203,6 +237,7 @@ def download(book_id, output, book=None, resume=False, cancel=None):
         os.link(temporary, target)  # Publish without replacing any existing file.
         result = {"id": book_id, "title": book["title"], "path": str(target.resolve()),
                   "bytes": size, "sha256": digest, "url": url, "skipped": False,
+                  "mtime_ns": target.stat().st_mtime_ns,
                   "version": book.get("version")}
         save_json(target.with_suffix(".ghm.json"), result)
         return result
@@ -231,22 +266,29 @@ def main():
     dl.add_argument("--resume", action="store_true", help="Skip existing files only after verifying their receipts and SHA-256")
     bulk = commands.add_parser("download-all", help="Download the catalog with persistent progress and retry support")
     bulk.add_argument("--lang")
+    bulk.add_argument("--query", help="Search title, author, filename or ID (Arabic/Persian spelling variants are normalized)")
+    bulk.add_argument("--category", help="Category ID or an unambiguous category name; includes its subcategories")
     bulk.add_argument("--limit", type=int)
+    bulk.add_argument("--offset", type=int, default=0)
+    bulk.add_argument("--skip-completed", action="store_true", help="Skip already converted books, or already downloaded originals without --with-epub")
     bulk.add_argument("--with-epub", action="store_true")
     bulk.add_argument("--plan", action="store_true", help="Show counts and storage estimate without downloading")
     server = commands.add_parser("serve", help="Start the local API used by the Bruno collection")
     server.add_argument("--port", type=int, default=8765)
+    server.add_argument("--data-dir", type=Path, help="Store books and job state in this folder, e.g. on an external drive")
     args = parser.parse_args()
     try:
         if args.command == "serve":
             from recovery_api import serve
-            serve(args.port)
+            serve(args.port, args.data_dir)
             return 0
         elif args.command == "download-all":
             from recovery_api import Manager
             manager = Manager()
-            options = {"scope": "all", "lang": args.lang, "limit": args.limit,
-                       "convert_epub": args.with_epub}
+            options = {"scope": "all", "lang": args.lang, "q": args.query or "", "category": args.category,
+                       "limit": args.limit, "offset": args.offset, "convert_epub": args.with_epub,
+                       "skip_converted": args.skip_completed and args.with_epub,
+                       "skip_downloaded": args.skip_completed and not args.with_epub}
             try:
                 if args.plan:
                     result = manager.plan(options)

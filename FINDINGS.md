@@ -97,11 +97,54 @@ the original app can be rebuilt. The relevant download method was independently
 recovered through REA without such errors. Obfuscated names remain where no
 original mapping file was supplied.
 
-The client preserves `.ghm` files as received. It does not convert or decrypt
-them to PDF, EPUB or plain text. No APK was launched and no emulator or device
-was used. The APK's signature authenticity has not been verified.
+The original download client preserves `.ghm` files as received. The subsequent
+conversion work below adds EPUB export. No APK was launched and no emulator or
+device was used. The APK's signature authenticity has not been verified.
 
 The tested catalog, metadata and free downloads did not require credentials.
 Paid-book/account authorization and the state-changing login, purchase, notes,
 review and account APIs were not exercised. Static URLs for those functions
 remain visible in the decompiled source; their present behavior is unknown.
+
+## Bruno, bulk recovery and EPUB follow-up
+
+- `bruno/` contains the native Bruno collection and Local environment. Catalog
+  requests return JSON through the local adapter; download actions create
+  persistent jobs. Direct upstream requests are included separately.
+- `scripts/recovery_api.py` runs on loopback port 8765. SQLite stores selections,
+  completed books, failures, attempts and job state. Completed files are verified
+  by SHA-256 before being skipped. Restart recovery preserves completed work;
+  an interrupted individual file is retried from its beginning.
+- All-catalog plan: 24,646 entries, 61,950,783,536 bytes of originals, including
+  four priced entries. Server authorization still applies. The full 62 GB backup
+  has not been launched as part of the collection's bounded verification.
+- The APK's `com.ghbook.reader.engine.f.g()` constructs `m0.b` with the format's
+  fixed base bytes. `m0.b.b()` decrypts independent 16,384-byte encrypted chunks
+  with a big-endian block counter appended to the base key. `m0.a.a()` uses
+  AES-256-CBC with PKCS padding and an IV from the first 16 key bytes.
+- Porting that format reader to `scripts/decode_ghm.mjs` recovered a valid ZIP
+  from the real samples. Members include `bookinfo.xml`, a UTF-8 text/markup
+  `out.xml`, navigation/page maps, cover image, optional resources and auxiliary
+  databases. `l0.a.c()` confirms the archive's XML is plaintext at import time;
+  the app encrypts selected files again for its installed storage.
+- `scripts/ghm_epub.py` turns that recovered content into EPUB 3. Inline
+  `meta type=ref` information becomes visible notes. Bundled resources and RTL
+  direction are retained; absent/unsupported media is reported in receipts.
+- Converted samples: `5992` (Arabic), `12881` (Persian/Arabic), `13714` (bundled
+  prayer book with images), and a new live download of `4696` (Persian).
+  All four passed EPUBCheck 5.4.0 with zero errors or warnings. Reports are
+  `analysis/epubcheck-ID.json`; generated books and receipts are in `epubs/`.
+- Bruno CLI 4.3.0 passed the catalog requests and a live download-by-ID job for
+  `4696` with EPUB conversion enabled. Re-running the earlier `5992`/`12881`
+  selection preserved and verified existing files. The full-catalog response
+  triggered one recoverable Bruno QuickJS cleanup diagnostic; requests and
+  assertions still passed.
+- The focused Python suite verifies binary transfer identity, corrupted-file
+  protection, per-book failures without aborting a bulk job, selective retry,
+  pause/resume, interrupted-state recovery, single service ownership, API
+  validation, and EPUB text/notes/images/direction.
+
+These observations establish conversion for the tested APK/container variants.
+They do not establish perfect formatting, complete external audio recovery, or
+support for every one of the 24,646 catalog entries. Original GHM files remain
+available for further migration work.

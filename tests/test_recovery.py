@@ -61,10 +61,11 @@ class TransferTests(unittest.TestCase):
             path = Path(directory) / book["file_name"]
             path.write_bytes(b"good")
             ghbook.save_json(path.with_suffix(".ghm.json"), {
-                "id": 1, "bytes": 4, "sha256": ghbook.file_hash(path), "path": str(path),
+                "id": 1, "bytes": 4, "sha256": ghbook.file_hash(path), "path": "/previous-laptop/book.ghm",
             })
             result = ghbook.download(1, Path(directory), book=book, resume=True)
             self.assertTrue(result["skipped"])
+            self.assertEqual(result["path"], str(path.resolve()))
             path.write_bytes(b"evil")
             with self.assertRaises(FileExistsError):
                 ghbook.download(1, Path(directory), book=book, resume=True)
@@ -217,7 +218,14 @@ class EpubTests(unittest.TestCase):
                 images = chapter.findall(".//{" + ghm_epub.XHTML + "}img")
                 self.assertEqual(len(images), 1)
                 self.assertIn("OEBPS/" + images[0].attrib["src"], epub.namelist())
-            self.assertTrue(ghm_epub.convert(source, output)["skipped"])
+            receipt = output.with_suffix(".epub.json")
+            previous = json.loads(receipt.read_text())
+            previous.update({"path": "/previous-laptop/book.epub", "source": "/previous-laptop/book.ghm"})
+            receipt.write_text(json.dumps(previous))
+            resumed = ghm_epub.convert(source, output)
+            self.assertTrue(resumed["skipped"])
+            self.assertEqual(resumed["path"], str(output.resolve()))
+            self.assertEqual(resumed["source"], str(source.resolve()))
             output.write_bytes(b"changed")
             with self.assertRaises(FileExistsError):
                 ghm_epub.convert(source, output)

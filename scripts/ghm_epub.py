@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Convert the supplied app's GHM container to a reflowable EPUB 3 publication."""
 import argparse
+from contextlib import contextmanager
 import datetime
 import hashlib
 import html
@@ -132,6 +133,64 @@ def validate(path):
                 raise ValueError("Missing EPUB spine item")
 
 
+class UnsupportedGhm(ValueError):
+    """The local container cannot be read by this version of the recovered reader."""
+
+
+@contextmanager
+def opened_ghm(source):
+    node = ROOT / ".tools/node_modules/node/bin/node"
+    runtime = str(node) if node.exists() else shutil.which("node")
+    if not runtime:
+        raise RuntimeError("Node.js is required to decode GHM; use the project installation")
+    with tempfile.TemporaryDirectory(prefix="ghm-read-") as temporary:
+        decoded = Path(temporary) / "book.zip"
+        if zipfile.is_zipfile(source):
+            shutil.copyfile(source, decoded)
+        else:
+            result = subprocess.run([runtime, str(ROOT / "scripts/decode_ghm.mjs"), str(source), str(decoded)],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise UnsupportedGhm("Cannot decode this GHM version: " + result.stderr[-1200:])
+        with zipfile.ZipFile(decoded) as archive:
+            names = {}
+            for original in archive.namelist():
+                name = original.replace("\\", "/")
+                if name.startswith("/") or ".." in PurePosixPath(name).parts:
+                    raise UnsupportedGhm("Unsafe archive member path")
+                if name in names:
+                    raise UnsupportedGhm("Duplicate archive member: " + name)
+                names[name] = original
+            info = ET.fromstring(archive.read(names["bookinfo.xml"]))
+            if info.tag != "bookinfo":
+                info = info.find(".//bookinfo")
+            if info is None:
+                raise UnsupportedGhm("Missing GHM book metadata")
+            meta = {item.tag: clean(item.text or "").strip() for item in info}
+            text = clean(archive.read(names["out.xml"]).decode("utf-8-sig"))
+            if not text.strip():
+                raise UnsupportedGhm("Book has no text content")
+            yield archive, names, meta, text
+
+
+def inspect_book(source):
+    source = Path(source).resolve()
+    try:
+        with opened_ghm(source) as (archive, names, meta, text):
+            bad = archive.testzip()
+            if bad:
+                raise UnsupportedGhm("Archive integrity check failed: " + bad)
+            missing = sorted({name.replace("\\", "/").split("|", 1)[0].strip()
+                              for kind, name in MEDIA.findall(text)
+                              if kind != "pagebreak" and name.replace("\\", "/").split("|", 1)[0].strip() not in names})
+            return {"compatible": True, "id": meta.get("booknumber"), "title": meta.get("title"),
+                    "language": meta.get("language", "und").lower(), "characters": len(text),
+                    "members": len(names), "missing_media": missing,
+                    "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+    except (zipfile.BadZipFile, ET.ParseError, UnicodeError, KeyError) as error:
+        raise UnsupportedGhm(str(error)) from error
+
+
 def convert(source, output=None):
     source = Path(source).resolve()
     digest = hashlib.sha256()
@@ -146,38 +205,11 @@ def convert(source, output=None):
             previous = json.loads(receipt.read_text())
             if previous.get("source_sha256") == source_hash and previous.get("sha256") == hashlib.sha256(output.read_bytes()).hexdigest():
                 validate(output)
-                return {**previous, "skipped": True}
+                return {**previous, "source": str(source), "path": str(output.resolve()), "skipped": True}
         raise FileExistsError(f"Existing EPUB does not match this source: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    node = ROOT / ".tools/node_modules/node/bin/node"
-    runtime = str(node) if node.exists() else shutil.which("node")
-    if not runtime:
-        raise RuntimeError("Node.js is required to decode GHM; use the project installation")
     with tempfile.TemporaryDirectory(prefix="ghm-epub-") as temporary:
-        decoded = Path(temporary) / "book.zip"
-        if zipfile.is_zipfile(source):
-            shutil.copyfile(source, decoded)
-        else:
-            result = subprocess.run([runtime, str(ROOT / "scripts/decode_ghm.mjs"), str(source), str(decoded)],
-                                    capture_output=True, text=True)
-            if result.returncode:
-                raise ValueError("Cannot decode this GHM version: " + result.stderr[-1200:])
-        with zipfile.ZipFile(decoded) as archive:
-            names = {}
-            for original in archive.namelist():
-                name = original.replace("\\", "/")
-                if name.startswith("/") or ".." in PurePosixPath(name).parts:
-                    raise ValueError("Unsafe archive member path")
-                if name in names:
-                    raise ValueError("Duplicate archive member: " + name)
-                names[name] = original
-            info = ET.fromstring(archive.read(names["bookinfo.xml"]))
-            if info.tag != "bookinfo":
-                info = info.find(".//bookinfo")
-            if info is None:
-                raise ValueError("Missing GHM book metadata")
-            meta = {item.tag: clean(item.text or "").strip() for item in info}
-            text = clean(archive.read(names["out.xml"]).decode("utf-8-sig"))
+        with opened_ghm(source) as (archive, names, meta, text):
             lang = meta.get("language", "").lower() or "und"
             if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", lang):
                 lang = "und"
@@ -294,7 +326,8 @@ def convert(source, output=None):
                 stage.unlink(missing_ok=True)
     receipt = {"id": meta.get("booknumber"), "title": title, "language": lang,
                "source": str(source), "source_sha256": source_hash, "path": str(output.resolve()),
-               "bytes": output.stat().st_size, "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+               "bytes": output.stat().st_size, "mtime_ns": output.stat().st_mtime_ns,
+               "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
                "chapters": len(sections), "assets": len(assets), "missing_media": sorted(missing),
                "format": "EPUB 3", "skipped": False}
     output.with_suffix(".epub.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

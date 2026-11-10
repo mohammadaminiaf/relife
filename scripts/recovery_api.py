@@ -4,18 +4,26 @@ from contextlib import contextmanager
 import datetime
 import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import csv
+import io
 import json
+import mimetypes
+import os
 from pathlib import Path
 import re
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.parse
 import uuid
+import zipfile
 
 import ghbook
 import ghm_epub
+from library_index import LibraryIndex
 
 
 def now():
@@ -27,9 +35,11 @@ class Conflict(ValueError):
 
 
 class Manager:
-    def __init__(self, root=None, books=None):
+    def __init__(self, root=None, books=None, data_dir=None):
         self.root = Path(root or ghbook.ROOT)
-        self.state_dir = self.root / "analysis/recovery"
+        self.data_dir = Path(data_dir).expanduser().resolve() if data_dir else self.root
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = self.data_dir / "analysis/recovery"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.lockfile = (self.state_dir / "service.lock").open("a+")
         try:
@@ -39,8 +49,8 @@ class Manager:
             raise Conflict("Recovery service is already running; use Bruno or stop it before starting another instance")
         self.books = books if books is not None else ghbook.catalog()
         self.by_id = {int(b["id"]): b for b in self.books}
-        self.downloads = self.root / "downloads"
-        self.epubs = self.root / "epubs"
+        self.downloads = self.data_dir / "downloads"
+        self.epubs = self.data_dir / "epubs"
         self.guard = threading.RLock()
         self.worker = None
         self.active_job = None
@@ -59,9 +69,15 @@ class Manager:
                     PRIMARY KEY(job_id, book_id)
                 );
                 CREATE INDEX IF NOT EXISTS item_status ON items(job_id, status, book_id);
+                CREATE TABLE IF NOT EXISTS library_state (
+                    book_id INTEGER PRIMARY KEY, fingerprint TEXT, compatible INTEGER,
+                    checked_at TEXT, details TEXT NOT NULL DEFAULT '{}',
+                    action TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT ''
+                );
             """)
             db.execute("UPDATE jobs SET state='interrupted', updated=? WHERE state IN ('running','pausing')", (now(),))
             db.execute("UPDATE items SET status='pending' WHERE status='active'")
+        self.library = LibraryIndex(self)
 
     @contextmanager
     def db(self):
@@ -100,7 +116,14 @@ class Manager:
             books = [self.by_id[i] for i in dict.fromkeys(ids)]
         else:
             raise ValueError("scope must be all or ids")
-        if kind == "convert" and scope == "all":
+        excluded = options.get("exclude_ids", [])
+        if not isinstance(excluded, list) or any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in excluded):
+            raise ValueError("exclude_ids must contain positive integer IDs")
+        if excluded:
+            excluded = set(excluded)
+            books = [b for b in books if int(b["id"]) not in excluded]
+        books = self.library.filtered(books, options)
+        if kind in {"convert", "check"}:
             available = []
             for book in books:
                 try:
@@ -109,11 +132,18 @@ class Manager:
                 except (FileNotFoundError, ValueError):
                     continue
             books = available
-        lang = options.get("lang")
-        if lang:
-            if not isinstance(lang, str):
-                raise ValueError("lang must be a language code")
-            books = [b for b in books if b.get("lang") == lang]
+        inventory = None
+        for flag in ("skip_converted", "skip_downloaded", "skip_checked"):
+            if not isinstance(options.get(flag, False), bool):
+                raise ValueError(flag + " must be true or false")
+            if options.get(flag):
+                inventory = inventory if inventory is not None else self.library.inventory()
+                field = {"skip_converted": "epub_available", "skip_downloaded": "downloaded", "skip_checked": "can_convert"}[flag]
+                books = [b for b in books if (inventory[int(b["id"])].get(field) is None if flag == "skip_checked" else not inventory[int(b["id"])].get(field))]
+        offset = options.get("offset", 0)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a nonnegative integer")
+        books = books[offset:]
         limit = options.get("limit")
         if limit is not None:
             if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
@@ -126,6 +156,8 @@ class Manager:
         return books
 
     def plan(self, options, kind="download"):
+        if kind not in {"download", "convert", "check"}:
+            raise ValueError("Invalid job kind")
         books = self.selected(options, kind)
         existing = 0
         missing_bytes = 0
@@ -133,7 +165,7 @@ class Manager:
         for book in books:
             try:
                 filename = ghbook.book_filename(book)
-                if (self.downloads / filename).exists() or kind == "convert" and (self.downloads / "bundled" / filename).exists():
+                if (self.downloads / filename).exists() or kind in {"convert", "check"} and (self.downloads / "bundled" / filename).exists():
                     existing += 1
                 else:
                     missing_bytes += int(book.get("file_size") or 0)
@@ -141,13 +173,14 @@ class Manager:
                 invalid.append(int(book["id"]))
         return {"books": len(books), "estimated_ghm_bytes": sum(int(b.get("file_size") or 0) for b in books),
                 "missing_ghm_bytes": missing_bytes, "existing_files_to_verify": existing,
-                "disk_free_bytes": shutil.disk_usage(self.root).free,
+                "disk_free_bytes": shutil.disk_usage(self.data_dir).free,
                 "epub_additional_bytes": None, "paid_entries": sum(int(b.get("price") or 0) > 0 for b in books),
                 "invalid_filenames": invalid, "downloads_directory": str(self.downloads),
-                "epubs_directory": str(self.epubs), "selection": options}
+                "epubs_directory": str(self.epubs), "selection": options, "kind": kind,
+                "sample": [{"id": int(b["id"]), "title": b["title"]} for b in books[:6]]}
 
     def create(self, options, kind="download"):
-        if kind not in {"download", "convert"}:
+        if kind not in {"download", "convert", "check"}:
             raise ValueError("Invalid job kind")
         books = self.selected(options, kind)
         plan = self.plan(options, kind)
@@ -235,15 +268,36 @@ class Manager:
         if self.cancel.is_set():
             raise InterruptedError("Job paused")
         if kind == "download":
-            result = ghbook.download(int(book["id"]), self.downloads, book=book, resume=True, cancel=self.cancel.is_set)
+            try:
+                result = ghbook.download(int(book["id"]), self.downloads, book=book, resume=True, cancel=self.cancel.is_set)
+                self.library.record(book, "download", result=result)
+            except InterruptedError:
+                raise
+            except Exception as error:
+                self.library.record(book, "download", error=error)
+                raise
             source = Path(result["path"])
         else:
             source = self.local_source(book)
             result = {"id": int(book["id"]), "path": str(source), "skipped": True}
+        if kind == "check":
+            try:
+                check = ghm_epub.inspect_book(source)
+                self.library.record(book, "check", result=check)
+                return {**result, "check": check, "skipped": False}
+            except Exception as error:
+                self.library.record(book, "check", error=error, incompatible=isinstance(error, ghm_epub.UnsupportedGhm))
+                raise
         if kind == "convert" or options.get("convert_epub"):
             if self.cancel.is_set():
                 raise InterruptedError("Job paused")
-            converted = ghm_epub.convert(source, self.epubs / (source.stem + ".epub"))
+            try:
+                converted = ghm_epub.convert(source, self.epubs / (source.stem + ".epub"))
+                self.library.record(book, "convert", result=converted)
+            except Exception as error:
+                unsupported = isinstance(error, (ghm_epub.UnsupportedGhm, zipfile.BadZipFile, ghm_epub.ET.ParseError, UnicodeError, KeyError))
+                self.library.record(book, "convert", error=error, incompatible=unsupported)
+                raise
             result["epub"] = converted
             result["skipped"] = result["skipped"] and converted["skipped"]
         return result
@@ -308,6 +362,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_file(self, target, mime=None, attachment=False):
+        if not target.is_file():
+            raise FileNotFoundError("This file is not available yet")
+        self.send_response(200)
+        self.send_header("Content-Type", mime or mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(target.stat().st_size))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if attachment:
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(target.name))
+        self.end_headers()
+        with target.open("rb") as stream:
+            shutil.copyfileobj(stream, self.wfile)
+
     def do_GET(self):
         self.dispatch(False)
 
@@ -321,6 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": str(error)})
         except Conflict as error:
             self.send_json(409, {"error": str(error)})
+        except FileNotFoundError as error:
+            self.send_json(404, {"error": str(error)})
         except (ValueError, TypeError) as error:
             self.send_json(400, {"error": str(error)})
         except (OSError, RuntimeError) as error:
@@ -344,8 +414,25 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("Body must be a JSON object")
-            if path in {"/jobs", "/conversions"}:
-                self.send_json(202, manager.create(body, "convert" if path == "/conversions" else "download"))
+            if path == "/library/plan":
+                kind = body.pop("kind", "download")
+                self.send_json(200, manager.plan(body, kind))
+                return
+            if path in {"/jobs", "/conversions", "/checks"}:
+                kind = {"/jobs": "download", "/conversions": "convert", "/checks": "check"}[path]
+                self.send_json(202, manager.create(body, kind))
+                return
+            if path == "/open-folder":
+                directory = {"downloads": manager.downloads, "epubs": manager.epubs}.get(body.get("folder"))
+                if directory is None:
+                    raise ValueError("folder must be downloads or epubs")
+                directory.mkdir(parents=True, exist_ok=True)
+                command = "open" if sys.platform == "darwin" else "xdg-open"
+                executable = shutil.which(command)
+                if not executable:
+                    raise ValueError("No desktop folder opener is installed. Saved files are at " + str(directory))
+                subprocess.Popen([executable, str(directory)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.send_json(200, {"path": str(directory)})
                 return
             match = re.fullmatch(r"/jobs/([0-9a-f]{32})/(pause|resume)", path)
             if match:
@@ -357,35 +444,76 @@ class Handler(BaseHTTPRequestHandler):
                         raise Conflict("Pause the current job before refreshing the catalog")
                     manager.books = ghbook.catalog(refresh=True)
                     manager.by_id = {int(b["id"]): b for b in manager.books}
+                    manager.library.rebuild()
                 self.send_json(200, {"books": len(manager.books)})
                 return
         else:
+            assets = {"": ("index.html", "text/html; charset=utf-8"),
+                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                      "/app.css": ("app.css", "text/css; charset=utf-8"),
+                      "/icon.svg": ("icon.svg", "image/svg+xml")}
+            if path in assets:
+                name, mime = assets[path]
+                self.send_file(ghbook.ROOT / "web" / name, mime)
+                return
             if path == "/health":
                 self.send_json(200, {"status": "ok", "catalog_books": len(manager.books),
+                                     "app": "revive-library", "version": 2, "pid": os.getpid(),
+                                     "root": str(manager.root.resolve()), "data_dir": str(manager.data_dir.resolve()),
+                                     "conversion_runtime": bool((ghm_epub.ROOT / ".tools/node_modules/node/bin/node").is_file() or shutil.which("node")),
                                      "active_job": manager.active_job if manager.worker and manager.worker.is_alive() else None,
                                      "downloads_directory": str(manager.downloads), "epubs_directory": str(manager.epubs)})
                 return
+            if path == "/library/summary":
+                self.send_json(200, manager.library.summary())
+                return
+            if path == "/categories":
+                self.send_json(200, {"categories": manager.library.category_rows()})
+                return
+            if path == "/library/export":
+                inventory = manager.library.inventory()
+                books = manager.library.filtered(manager.books, query)
+                buffer = io.StringIO()
+                fields = ["id", "title", "author", "lang", "category", "status", "can_convert", "downloaded", "epub_available", "error"]
+                writer = csv.DictWriter(buffer, fieldnames=fields)
+                writer.writeheader()
+                for book in books:
+                    row = manager.library.annotate(book, inventory)
+                    writer.writerow({**{k: book.get(k, "") for k in ("id", "title", "author", "lang")},
+                                     "category": " / ".join(c["title"] for c in row["categories"]),
+                                     **{k: row["local"].get(k, "") for k in fields[5:]}})
+                data = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="revive-library.csv"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/books":
-                books = manager.books
-                if query.get("lang"):
-                    books = [b for b in books if b.get("lang") == query["lang"]]
-                if query.get("q"):
-                    term = query["q"].casefold()
-                    books = [b for b in books if any(term in str(b.get(k, "")).casefold() for k in ("id", "title", "author", "file_name"))]
+                books = manager.library.filtered(manager.books, query)
                 page, size = self.pagination(query, len(books))
+                inventory = manager.library.inventory()
                 self.send_json(200, {"total": len(books), "page": page, "page_size": size,
-                                     "books": books[(page - 1) * size:page * size]})
+                                     "books": [manager.library.annotate(b, inventory) for b in books[(page - 1) * size:page * size]]})
                 return
             match = re.fullmatch(r"/books/(\d+)", path)
             if match:
                 book = manager.by_id[int(match[1])]
-                self.send_json(200, {**book, "download_url": ghbook.download_url({**book, "ghm_file_name": ghbook.book_filename(book)})})
+                self.send_json(200, {**manager.library.annotate(book), "download_url": ghbook.download_url({**book, "ghm_file_name": ghbook.book_filename(book)})})
+                return
+            match = re.fullmatch(r"/receipts/(\d+)\.json", path)
+            if match:
+                book = manager.by_id[int(match[1])]
+                source = manager.local_source(book)
+                target = (manager.epubs / (source.stem + ".epub.json")) if query.get("type", "epub") == "epub" else source.with_suffix(".ghm.json")
+                self.send_file(target, "application/json; charset=utf-8", attachment=True)
                 return
             if path == "/downloads/plan":
                 options = {"scope": query.get("scope", "all")}
                 if query.get("ids"):
                     options = {"scope": "ids", "ids": [int(i) for i in query["ids"].split(",")]}
-                for key in ("lang", "limit"):
+                for key in ("lang", "limit", "q", "category", "state", "sort"):
                     if query.get(key):
                         options[key] = int(query[key]) if key == "limit" else query[key]
                 self.send_json(200, manager.plan(options))
@@ -409,13 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = source if match[3] == "ghm" else manager.epubs / (source.stem + ".epub")
                 if not target.is_file():
                     raise KeyError("Requested file has not been created")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/epub+zip" if match[3] == "epub" else "application/octet-stream")
-                self.send_header("Content-Length", str(target.stat().st_size))
-                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(target.name))
-                self.end_headers()
-                with target.open("rb") as stream:
-                    shutil.copyfileobj(stream, self.wfile)
+                self.send_file(target, "application/epub+zip" if match[3] == "epub" else "application/octet-stream", attachment=True)
                 return
         self.send_json(404, {"error": "Unknown endpoint"})
 
@@ -428,13 +550,13 @@ class Handler(BaseHTTPRequestHandler):
         return page, size
 
 
-def serve(port=8765):
-    manager = Manager()
+def serve(port=8765, data_dir=None):
+    manager = Manager(data_dir=data_dir)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         server.manager = manager
         print(f"GHBook recovery API: http://127.0.0.1:{port} ({len(manager.books)} catalog entries)", flush=True)
-        print("Open the bruno/ collection in Bruno and select the Local environment.", flush=True)
+        print(f"Library app: http://127.0.0.1:{port} — saved files: {manager.data_dir}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

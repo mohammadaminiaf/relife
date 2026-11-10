@@ -7,7 +7,7 @@ downloads/
 __pycache__/
 .DS_Store
 epubs/
-rea/
 .tools/bruno/node_modules/
 .tools/epubcheck/
 bruno/.env
+bruno/**/response.json
