@@ -135,7 +135,7 @@ class LibraryIndex:
                 current = bool(source and fact.get("fingerprint") == stamp)
                 compatible = bool(fact["compatible"]) if current and fact.get("compatible") is not None else None
                 epub = manager.epubs / (Path(filename).stem + ".epub")
-                available, epub_bytes, warning_count = False, 0, 0
+                available, epub_bytes, warning_count, has_cover = False, 0, 0, False
                 if source and epub.is_file():
                     receipt = self.read_json(epub.with_suffix(".epub.json"))
                     download_receipt = self.read_json(source.with_suffix(".ghm.json"))
@@ -145,6 +145,7 @@ class LibraryIndex:
                                      and receipt.get("bytes") == epub_bytes and str(receipt.get("id")) == str(book_id)
                                      and receipt.get("sha256") == self.checked_hash(epub, receipt))
                     warning_count = len(receipt.get("missing_media", []))
+                    has_cover = bool(receipt.get("cover"))
                 if available:
                     state, compatible = "converted", True
                 elif not source:
@@ -161,6 +162,7 @@ class LibraryIndex:
                                    "epub_available": available, "epub_bytes": epub_bytes,
                                    "can_convert": compatible, "checked_at": fact.get("checked_at") if current else None,
                                    "error": error, "missing_media_count": warning_count,
+                                   "has_cover": has_cover,
                                    "ghm_url": f"/files/{book_id}.ghm" if source else None,
                                    "epub_url": f"/epubs/{book_id}.epub" if available else None}
             self.snapshot = result
@@ -187,10 +189,12 @@ class LibraryIndex:
             books = [b for b in books if any(str(b.get(k, "")) in ids for k in ("subject", "subject_1", "subject_2"))]
         state = options.get("state")
         if state and state != "all":
-            if state not in {"converted", "convertible", "unchecked", "not_downloaded", "unsupported", "downloaded", "failed"}:
+            if state not in {"converted", "convertible", "unchecked", "not_downloaded", "unsupported", "downloaded", "failed", "needs_conversion", "conversion_failed"}:
                 raise ValueError("Unknown library status")
             inventory = self.inventory()
             books = [b for b in books if (inventory[int(b["id"])].get("downloaded") if state == "downloaded" else
+                                         inventory[int(b["id"])].get("downloaded") and not inventory[int(b["id"])].get("epub_available") if state == "needs_conversion" else
+                                         inventory[int(b["id"])].get("downloaded") and bool(inventory[int(b["id"])].get("error")) if state == "conversion_failed" else
                                          bool(inventory[int(b["id"])].get("error")) if state == "failed" else
                                          inventory[int(b["id"])]["status"] == state)]
         sort = options.get("sort", "id")

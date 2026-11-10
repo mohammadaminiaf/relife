@@ -2,6 +2,7 @@
 """Read the catalog and download books using requests recovered from Myghbook.apk."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 import csv
 import hashlib
 import html
@@ -12,10 +13,12 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from download_diagnostics import response_failure
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "analysis"
@@ -36,7 +39,7 @@ def request(url, headers=None):
     return urllib.request.urlopen(urllib.request.Request(https(url), headers={
         "User-Agent": "GHBook-Recovery/1.0",
         **(headers or {}),
-    }), timeout=90)
+    }), timeout=30)
 
 
 def fetch_json(url):
@@ -49,11 +52,34 @@ def save_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def transfer(url, stream, book=False, cancel=None):
-    """Use bounded HTTP ranges on this server; accept normal streaming elsewhere."""
-    block = 128 * 1024
+def transfer(url, stream, book=False, cancel=None, progress=None, metrics=None, mode="auto"):
+    """Stream books with one request; use bounded ranges as a retry fallback."""
+    block = 1024 * 1024
+    read_size = 64 * 1024
     digest = hashlib.sha256()
     size = 0
+    started = time.monotonic()
+    metrics = metrics if metrics is not None else {}
+    metrics.update({"requests": 0, "mode": "stream" if book and mode != "ranges" else "ranges", "time_to_headers_seconds": None})
+
+    def report(**event):
+        if progress:
+            progress(event)
+
+    def open_response(headers):
+        if cancel and cancel():
+            raise InterruptedError("Job paused")
+        report(phase="connecting")
+        metrics["requests"] += 1
+        response = request(url, headers)
+        if metrics["time_to_headers_seconds"] is None:
+            metrics["time_to_headers_seconds"] = time.monotonic() - started
+        report(phase="downloading", http_status=response.status)
+        mime = response.headers.get_content_type()
+        if book and (mime.startswith("text/") or mime in ("application/json", "application/problem+json")):
+            with response:
+                raise response_failure(response.status, response.headers, response.read(8192), url)
+        return response
 
     def write(data):
         nonlocal size
@@ -62,25 +88,29 @@ def transfer(url, stream, book=False, cancel=None):
         stream.write(data)
         digest.update(data)
         size += len(data)
+        report(phase="downloading", delta=len(data), bytes=size)
 
-    with request(url, {"Range": f"bytes=0-{block - 1}"}) as response:
-        mime = response.headers.get_content_type()
-        if book and (mime.startswith("text/") or mime in ("application/json", "application/problem+json")):
-            raise ValueError(f"Server returned {mime} instead of a book")
+    headers = {} if book and mode != "ranges" else {"Range": f"bytes=0-{block - 1}"}
+    with open_response(headers) as response:
         if response.status == 200:
             expected = response.headers.get("Content-Length")
+            report(total=int(expected) if expected else None)
             while True:
-                data = response.read(block)
+                if cancel and cancel():
+                    raise InterruptedError("Job paused")
+                data = response.read(read_size)
                 if not data:
                     break
                 write(data)
             if size == 0 or (expected is not None and size != int(expected)):
                 raise ValueError("Incomplete download")
+            metrics.update({"seconds": time.monotonic() - started, "bytes": size})
             return size, digest.hexdigest()
         match = re.fullmatch(r"bytes 0-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
         if response.status != 206 or not match:
             raise ValueError("Invalid initial HTTP range response")
         end, total = map(int, match.groups())
+        report(total=total)
         if end != min(block, total) - 1 or total <= 0:
             raise ValueError("Unexpected initial HTTP byte range")
         data = response.read()
@@ -96,7 +126,7 @@ def transfer(url, stream, book=False, cancel=None):
         headers = {"Range": f"bytes={start}-{end}"}
         if validator:
             headers["If-Range"] = validator
-        with request(url, headers) as response:
+        with open_response(headers) as response:
             if response.status != 206 or response.headers.get("Content-Range") != f"bytes {start}-{end}/{total}":
                 raise ValueError("Server changed the file or returned an unexpected byte range")
             data = response.read()
@@ -104,13 +134,21 @@ def transfer(url, stream, book=False, cancel=None):
             raise ValueError("Incomplete HTTP byte range")
         return data
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for offset in range(size, total, block * 4):
-            # Bound retained response data to four blocks and preserve byte order.
-            for data in pool.map(part, range(offset, min(offset + block * 4, total), block)):
-                write(data)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        offsets = iter(range(size, total, block))
+        pending = deque()
+        for _ in range(2):
+            offset = next(offsets, None)
+            if offset is not None:
+                pending.append(pool.submit(part, offset))
+        while pending:
+            write(pending.popleft().result())
+            offset = next(offsets, None)
+            if offset is not None:
+                pending.append(pool.submit(part, offset))
     if size != total:
         raise ValueError("Incomplete download")
+    metrics.update({"seconds": time.monotonic() - started, "bytes": size})
     return size, digest.hexdigest()
 
 
@@ -210,7 +248,7 @@ def book_filename(book):
     return filename
 
 
-def download(book_id, output, book=None, resume=False, cancel=None):
+def download(book_id, output, book=None, resume=False, cancel=None, progress=None, mode="auto"):
     book = dict(book) if book is not None else metadata(book_id)
     book["ghm_file_name"] = book_filename(book)
     filename = book["ghm_file_name"]
@@ -230,15 +268,16 @@ def download(book_id, output, book=None, resume=False, cancel=None):
         raise FileExistsError(f"{reason}: {target}")
     url = download_url(book)
     temporary = None
+    metrics = {}
     try:
         with tempfile.NamedTemporaryFile(dir=output, prefix=".ghbook-", suffix=".part", delete=False) as stream:
             temporary = Path(stream.name)
-            size, digest = transfer(url, stream, book=True, cancel=cancel)
+            size, digest = transfer(url, stream, book=True, cancel=cancel, progress=progress, metrics=metrics, mode=mode)
         os.link(temporary, target)  # Publish without replacing any existing file.
         result = {"id": book_id, "title": book["title"], "path": str(target.resolve()),
                   "bytes": size, "sha256": digest, "url": url, "skipped": False,
                   "mtime_ns": target.stat().st_mtime_ns,
-                  "version": book.get("version")}
+                  "version": book.get("version"), "transfer": metrics}
         save_json(target.with_suffix(".ghm.json"), result)
         return result
     finally:

@@ -148,3 +148,60 @@ These observations establish conversion for the tested APK/container variants.
 They do not establish perfect formatting, complete external audio recovery, or
 support for every one of the 24,646 catalog entries. Original GHM files remain
 available for further migration work.
+
+## Download performance and library redesign (November 10, 2026)
+
+The downloader now prefers one streaming response per book and processes up to
+8 books concurrently (1/2/4/8 selectable). A failed or stalled stream can retry
+using bounded 1 MiB ranges with two range workers per book. Originals are still
+published without overwriting existing files and have SHA-256 receipts.
+
+The first inspected batch, job `73d94732a15245f9bc6eb20bffd820ec`, saved
+106,166,288 bytes: 46 successes and four failures. Its recorded span was
+503.524 seconds. The old log did not measure active transfer time separately;
+that span includes retries and any user-driven continuation.
+
+Bounded live probes on this laptop established avoidable client overhead:
+
+| Probe | Result |
+| --- | --- |
+| Same 1,663,056-byte book, old 128 KiB ranges | 11.937 s, 13 requests |
+| Same book, single streaming response | 3.768 s, 1 request; repeated at 5.009 s |
+| Three books, sequential streaming | 3,343,024 bytes in 10.863 s |
+| Same three books, concurrent streaming | 3,343,024 bytes in 6.270 s |
+| Updated engine, eight concurrent books | 11,759,296 bytes in 15.696 s, 8 requests, zero failures |
+
+All compared hashes matched, including all eight results against existing
+library copies. These are bounded observations, not a guarantee for the full
+catalog or proof that the server can saturate the user's internet connection.
+Responses explicitly used `Connection: close`; reusing client connections
+would not remove that server behavior. Streaming and book concurrency address
+the measured request overhead and serialization. There is no application
+bytes-per-second cap.
+
+Local evidence is under `analysis/performance-probe.json`,
+`analysis/performance-stream.json`, and
+`analysis/benchmarks/20261110-073553-345948/report.json`. These generated artifacts
+are ignored by Git and belong to this laptop.
+
+The failed IDs 7, 8, 20, 43 (and subsequently 82) returned HTTP 200 `text/html`
+with a Persian notice saying the publisher/author requested removal. No 429
+or Retry-After was observed in those checks. The app records these as
+`publisher_removed`, saves the server's notice, and does not automatically
+retry them. A successful HTTP status alone does not establish a valid book.
+
+New jobs record live transferred bytes, request counts, elapsed time, active
+books, per-attempt error evidence and timing. Explicit rate limits cause shared
+backoff, honor Retry-After seconds/HTTP dates, and lower concurrency. The
+cooldown deadline and reduced concurrency survive a pause or restart. The
+Issues page can inspect bounded server responses for older failed jobs and
+export the complete job report as JSON.
+
+The UI has dedicated, directly addressable Catalog, Downloaded, EPUBs,
+Downloads, Convert, Activity, Issues and Settings pages. Saved books use card
+or list layouts; conversion supports a single original, a selected group, or
+the next guided batch. New EPUB receipts record bundled covers for thumbnails.
+Manual controls, local storage, existing books and SQLite jobs are retained.
+Browser QA exercised both guided queues with 105 generated local books,
+including simulated rate limiting, publisher removal, pause/reload/resume,
+manual conversion, card browsing, native file saves and mobile layouts.

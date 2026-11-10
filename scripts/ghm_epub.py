@@ -328,7 +328,7 @@ def convert(source, output=None):
                "source": str(source), "source_sha256": source_hash, "path": str(output.resolve()),
                "bytes": output.stat().st_size, "mtime_ns": output.stat().st_mtime_ns,
                "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-               "chapters": len(sections), "assets": len(assets), "missing_media": sorted(missing),
+               "chapters": len(sections), "assets": len(assets), "cover": bool(cover), "missing_media": sorted(missing),
                "format": "EPUB 3", "skipped": False}
     output.with_suffix(".epub.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return receipt

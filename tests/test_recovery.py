@@ -40,7 +40,7 @@ class TransferTests(unittest.TestCase):
 
         with patch.object(ghbook, "request", response):
             output = io.BytesIO()
-            size, _ = ghbook.transfer("example", output, book=True)
+            size, _ = ghbook.transfer("example", output, book=True, mode="ranges")
             self.assertEqual(size, len(content))
             self.assertEqual(output.getvalue(), content)
         with patch.object(ghbook, "request", return_value=Response(content, 200, Content_Length=str(len(content)))):
@@ -87,6 +87,7 @@ class JobTests(unittest.TestCase):
         self.books = [{"id": str(i), "title": str(i), "file_name": f"{i}-fa-book.ghm",
                        "file_size": "4", "lang": "fa", "price": "0"} for i in range(1, 4)]
         self.manager = Manager(self.root, self.books)
+        self.manager.configure({"download_workers": 1})
 
     def tearDown(self):
         self.manager.close()

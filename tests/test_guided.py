@@ -22,7 +22,7 @@ def sample_books(count=123):
             for i in range(1, count + 1)]
 
 
-def sample_download(book_id, output, book, resume=True, cancel=None):
+def sample_download(book_id, output, book, resume=True, cancel=None, **kwargs):
     if cancel and cancel():
         raise InterruptedError("Job paused")
     target = Path(output) / book["file_name"]
@@ -42,6 +42,7 @@ class GuidedTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.books = sample_books()
         self.manager = Manager(self.root, list(reversed(self.books)))
+        self.manager.configure({"download_workers": 1})
 
     def tearDown(self):
         self.manager.close()

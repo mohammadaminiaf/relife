@@ -15,8 +15,9 @@ With Python 3.9+ and Node.js installed, open PowerShell in this folder:
 
 The launcher opens <http://127.0.0.1:8765> and keeps the service running in the
 background. You can also double-click `library.cmd`. First launch downloads
-the catalog, so it needs internet access. Downloads and EPUBs also need access
-to the book server; browsing the cached catalog works offline.
+the catalog, so it needs internet access. Downloading originals needs access
+to the book server. Browsing the cached catalog and converting saved books
+work offline.
 
 ```powershell
 .\library.cmd --status
@@ -24,8 +25,8 @@ to the book server; browsing the cached catalog works offline.
 .\library.cmd --data-dir 'D:\Books'
 ```
 
-Use **Review next 50 downloads** to start guided recovery, or **Review batch**
-to choose books manually. The full library is
+Open **Downloads** and choose **Review next 50 downloads** to start guided
+recovery, or select books in **Catalog** to download them manually. The full library is
 about 62 GB before EPUBs; it is not downloaded automatically. Files default to
 `downloads/` and `epubs/`; job progress is in `analysis/recovery/`. To resume
 work from another laptop, stop its service and copy those three directories.
@@ -42,35 +43,83 @@ Main source files: `scripts/recovery_api.py` (HTTP and jobs),
 
 ## Library app
 
-### Guided recovery in batches of 50
+### Dedicated library pages
 
-The **Your library, 50 books at a time** panel handles the whole catalog without
-selecting individual books. Choose **Review next 50 downloads**, review the
-storage estimate, and confirm the batch. Originals save automatically to the
-displayed downloads folder. The panel tracks overall progress and the active
-batch; after it finishes, the next group waits for your confirmation. The final
-batch can contain fewer than 50 books. Only one job runs at a time.
+- **Catalog** (`/catalog`): search the complete catalog, filter by language or
+  category, and download one book, selected books, or a matching selection.
+- **Downloaded** (`/downloaded`): browse originals as cards or a list. Convert a
+  single book directly from its card, or select several and choose **Convert
+  selected**. The default home page is this saved library.
+- **EPUBs** (`/epubs`): browse completed EPUBs as cards and save individual copies.
+  Newly generated EPUBs use their bundled cover when one is available.
+- **Downloads** (`/downloads`): confirm the next 50 originals, choose download
+  concurrency, and watch live speed, bytes, active books, elapsed time and waits.
+- **Convert to EPUB** (`/conversions`): see downloaded originals that need EPUBs,
+  choose single or selected books, or confirm the next group of up to 50.
+- **Activity** (`/activity`): pause/resume jobs, inspect results and save reports.
+- **Issues** (`/errors`): understand failures, read the original server notice,
+  inspect current server responses, or review a retry batch.
+- **Settings & storage** (`/settings`): change parallel download preferences and
+  open the actual originals/EPUB folders. Advanced full-catalog manual recovery
+  and catalog refresh are available here.
 
-Use **Review next 50 conversions** in the same panel to turn saved originals
-into EPUBs. It automatically finds books without a matching completed EPUB and
-saves them to the EPUB folder. Downloads and conversion have separate queues,
-so you can alternate them whenever you like. These queues always use the whole
-catalog; search, filters and checkboxes apply to the manual controls below.
+All pages have direct URLs, browser back/forward navigation, and mobile layouts.
+Manual selected downloads, download-plus-EPUB, conversion and compatibility
+checks remain available alongside guided recovery.
 
-Files and SQLite progress survive browser refreshes and service restarts. If
-you pause or close the service during a guided batch, **Review unfinished batch**
-offers to resume the remaining work first. Existing files, including books
-downloaded manually or copied into the downloads folder, are detected. Deleting
-a saved original or EPUB makes that work eligible again. Keep originals: EPUB
-receipts are checked against them to recognize completed conversions.
+### Guided recovery and download performance
 
-Failed books are set aside so later batches can continue. **Review retries**
-offers up to 50 failed books for a separate confirmed retry, and **View jobs**
-shows per-book errors. The manual selection, filtered batches, compatibility
-checks, individual file downloads, conversion, and manual full restore remain
-available. On Windows and macOS, the same storage behavior applies; use
-**Saved files** to view or open the actual folders, or the launcher's
-`--data-dir` option to store your library on another drive.
+Review and confirm each group of at most 50 books. The app detects originals
+already on disk and completed EPUBs with matching receipts, then chooses the
+next books automatically. The final group can be smaller. Guided batches use
+the whole catalog; search and selection apply to manual actions.
+
+One batch runs at a time. Download batches stream **eight books concurrently**
+by default, with 1/2/4/8 options under Downloads or Settings. The preference
+applies to the next batch. There is no application bandwidth cap. Actual speed
+also depends on the remote server and the network path. Stalled or incomplete
+streams retry with bounded 1 MB ranges, with at most two range requests per
+book. Every published original retains its byte count and SHA-256 receipt.
+Conversion-only batches process local originals without network downloads.
+
+Files and SQLite state survive browser refreshes and service restarts. Use
+**Resume unfinished batch** to confirm continuation of remaining work. Deleting
+a saved original or EPUB makes that work eligible again; keep originals and
+receipts so completed EPUBs can be verified. Storage is the same on Windows
+and macOS; **Settings & storage** shows its paths and the launcher's
+`--data-dir` option chooses another drive.
+
+### Failure diagnosis
+
+Temporary network/server failures retry up to three times. Explicit HTTP 429
+or a clear rate-limit notice is reported as **Rate limited**. The downloader
+respects `Retry-After` (seconds or HTTP date), applies a shared cooldown and
+reduces concurrency. It does not treat every HTML response as rate limiting.
+
+For example, several catalog entries return HTTP 200 with a Persian notice
+saying the publisher/author requested removal. These are reported as **Removed
+by publisher**, with the original notice, and are not automatically retried.
+Unavailability, denied access, timeouts, connection/TLS errors, full disks and
+conflicting existing files have separate reasons and suggested actions.
+
+On Issues, **Inspect server responses** makes bounded response checks for up
+to 50 failed items in that job. It saves the latest HTTP evidence without
+saving or replacing a book. **Save report** exports per-attempt diagnostics,
+request/byte/timing totals and results. Old jobs keep their results; their
+recorded span is labeled separately from newly measured active transfer time.
+Failures stay aside while later guided batches continue. Explicit retry batches
+and per-job retry controls remain available.
+
+To benchmark one to eight explicit books in isolated storage:
+
+```sh
+python scripts/benchmark_downloads.py --ids 2 3 4 --workers 8
+```
+
+This downloads the selected samples into `analysis/benchmarks/`, compares their
+checksums with existing library copies when available, and saves `report.json`.
+It leaves the main library and jobs untouched. See `FINDINGS.md` for the measured
+streaming/concurrency comparison and its limits.
 
 Launch the browser library with `./library.sh`, or double-click
 `Library.command` on macOS. It supports catalog search, category and language
@@ -86,8 +135,9 @@ choose another port with `./library.sh --port 8767`.
 
 Checkpoint on November 10, 2026: the library interface, persistent jobs,
 guided download/conversion queues, conversion checks and setup scripts are
-implemented; all 24 Python tests pass. Browser QA covers both guided queues,
-confirmation, pause/resume and manual controls. Books and local job databases
+implemented; all 33 Python tests pass. Browser QA covers dedicated pages,
+card libraries, both guided queues, parallel downloads, rate limiting, failure
+inspection, confirmation, pause/resume, manual controls and mobile layouts. Books and local job databases
 are excluded from Git as described below. No full-catalog job starts on launch.
 
 ## Bruno API
@@ -225,9 +275,12 @@ python3 -m unittest discover -s tests -v
 ```
 
 For repeatable browser QA of the guided flow, with the local Playwright tools
-installed, run `python tests/serve_guided_fixture.py`, then in another terminal
-run `node tests/guided-browser.mjs`. This uses 105 generated local books,
-exercises both 50/50/5 queues and pause/resume, and does not download real books.
+installed, run `python tests/serve_guided_fixture.py --errors`, then in another terminal
+run `node tests/guided-browser.mjs`. This uses 105 generated local books and
+simulated rate limits/publisher removal, exercises both queues, page navigation,
+card libraries and pause/resume, and does not download real books.
+`node tests/library-browser.mjs` runs read-only browser smoke checks against the
+full local library. Screenshots and benchmark results stay under `analysis/`.
 
 The Python tests cover transfer integrity, corrupt-file preservation, bulk
 failure handling, pause/resume, restart recovery, HTTP endpoints and EPUB content.
