@@ -1,0 +1,21 @@
+meta {
+  name: Remote bootstrap
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{site_url}}/api/GetBaseUrl.php?id={{library_id}}
+  body: none
+  auth: none
+}
+
+script:post-response {
+  const body = res.getBody();
+  const config = typeof body === "string" ? JSON.parse(body) : body;
+  if (config.BookList_Zip) bru.setEnvVar("catalog_url", config.BookList_Zip.replace(/^http:/, "https:"));
+}
+
+docs {
+  Calls the recovered upstream API directly. Save binary responses manually; use Downloads for verified on-disk recovery.
+}

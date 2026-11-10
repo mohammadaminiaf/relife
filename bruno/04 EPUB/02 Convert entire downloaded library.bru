@@ -1,0 +1,40 @@
+meta {
+  name: Convert entire downloaded library
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{api_url}}/conversions
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "scope": "all"
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 202) {
+    bru.setEnvVar("job_id", res.getBody().id);
+    console.log("Track this job with Jobs / Job progress:", res.getBody().id);
+  }
+}
+
+tests {
+  test("Persistent job accepted", function () {
+    expect(res.getStatus()).to.equal(202);
+    expect(res.getBody().id).to.match(/^[0-9a-f]{32}$/);
+    expect(res.getBody().total).to.be.greaterThan(0);
+  });
+}
+
+docs {
+  Send this request individually. The response returns a job ID; follow progress in the Jobs folder. Existing verified files are preserved.
+}

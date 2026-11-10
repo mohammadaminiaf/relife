@@ -1,0 +1,23 @@
+meta {
+  name: Resume or retry job
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{api_url}}/jobs/{{job_id}}/resume
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+docs {
+  Send this request individually. The response returns a job ID; follow progress in the Jobs folder. Existing verified files are preserved.
+}

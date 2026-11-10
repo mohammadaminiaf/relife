@@ -1,0 +1,22 @@
+meta {
+  name: List all books
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{api_url}}/books?page_size=all
+  body: none
+  auth: none
+}
+
+tests {
+  test("Complete catalog returned", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().books.length).to.equal(res.getBody().total);
+  });
+}
+
+docs {
+  Uses the local recovery service. Start start-recovery.sh and select the Local environment.
+}

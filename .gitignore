@@ -1,0 +1,13 @@
+.tools/node_modules/
+.tools/*.jar
+.tools/*.zip
+Myghbook.apk
+analysis/
+downloads/
+__pycache__/
+.DS_Store
+epubs/
+rea/
+.tools/bruno/node_modules/
+.tools/epubcheck/
+bruno/.env

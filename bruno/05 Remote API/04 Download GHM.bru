@@ -1,0 +1,21 @@
+meta {
+  name: Remote download GHM
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{download_url}}/downloads.php?id={{book_id}}&file={{book_filename}}&type=ghm&platform=android&packagename=ir.ghbook.reader&libraryid={{library_id}}
+  body: none
+  auth: none
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("filename_book_id")) !== String(bru.getEnvVar("book_id"))) {
+    throw new Error("Run Remote metadata by ID after changing book_id to resolve its filename.");
+  }
+}
+
+docs {
+  Calls the recovered upstream API directly. Save binary responses manually; use Downloads for verified on-disk recovery.
+}

@@ -1,0 +1,22 @@
+meta {
+  name: Health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{api_url}}/health
+  body: none
+  auth: none
+}
+
+tests {
+  test("Recovery service is ready", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().catalog_books).to.be.greaterThan(0);
+  });
+}
+
+docs {
+  Uses the local recovery service. Start start-recovery.sh and select the Local environment.
+}

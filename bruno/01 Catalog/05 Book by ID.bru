@@ -1,0 +1,22 @@
+meta {
+  name: Book by ID
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{api_url}}/books/{{book_id}}
+  body: none
+  auth: none
+}
+
+tests {
+  test("Requested book returned", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(String(res.getBody().id)).to.equal(String(bru.getEnvVar("book_id")));
+  });
+}
+
+docs {
+  Uses the local recovery service. Start start-recovery.sh and select the Local environment.
+}

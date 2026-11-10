@@ -1,0 +1,15 @@
+meta {
+  name: Remote catalog ZIP
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{catalog_url}}
+  body: none
+  auth: none
+}
+
+docs {
+  Calls the recovered upstream API directly. Save binary responses manually; use Downloads for verified on-disk recovery.
+}

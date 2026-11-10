@@ -1,0 +1,22 @@
+meta {
+  name: Plan full recovery
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{api_url}}/downloads/plan?scope=all
+  body: none
+  auth: none
+}
+
+tests {
+  test("Storage estimate is available", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().estimated_ghm_bytes).to.be.greaterThan(0);
+  });
+}
+
+docs {
+  Uses the local recovery service. Start start-recovery.sh and select the Local environment.
+}

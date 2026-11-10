@@ -1,0 +1,15 @@
+meta {
+  name: Job progress
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{api_url}}/jobs/{{job_id}}
+  body: none
+  auth: none
+}
+
+docs {
+  Uses the local recovery service. Start start-recovery.sh and select the Local environment.
+}
